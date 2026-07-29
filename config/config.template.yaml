@@ -1,0 +1,46 @@
+# ALCF Agent — Hermes config template
+#
+# Rendered into the live config at container start by scripts/entrypoint.sh,
+# which substitutes ${...} placeholders from environment variables and injects
+# the freshly-minted Globus access token as the api_key.
+#
+# IMPORTANT: keep this MINIMAL. Do not add personal fallback providers, stray
+# base_urls, or secrets. The packaged agent must have exactly ONE inference
+# target so it never silently talks to the wrong host.
+
+model:
+  # The ALCF Inference Service is OpenAI-compatible. provider: custom tells
+  # Hermes to treat base_url as a raw OpenAI-wire endpoint.
+  provider: custom
+  base_url: "${ALCF_BASE_URL}"        # e.g. https://inference-api.alcf.anl.gov/resource_server/sophia/vllm/v1
+  api_key: "${ALCF_ACCESS_TOKEN}"     # Globus access token, injected + refreshed by entrypoint
+  model: "${ALCF_MODEL}"              # e.g. openai/gpt-oss-120b
+  default: "${ALCF_MODEL}"
+
+  # Reasoning models (gpt-oss-*) spend the output budget on a hidden reasoning
+  # channel; too small a cap yields empty content. Give them headroom.
+  max_tokens: ${ALCF_MAX_TOKENS}
+
+  # The ALCF vLLM gateway rejects a `name` field on role:tool messages with
+  # HTTP 422 (extra_forbidden), which breaks agentic tool use. This flag makes
+  # Hermes strip it for this provider. REQUIRED for tools to work here.
+  strip_tool_message_name: true
+
+agent:
+  # Trim toolsets that make no sense in this packaged, single-user context.
+  disabled_toolsets:
+    - computer_use
+    - image_gen
+    - video_gen
+    - tts
+    - spotify
+    - x_search
+    - yuanbao
+
+memory:
+  # Local, on-disk memory persisted via the mounted ~/.hermes volume.
+  provider: mnemosyne
+
+display:
+  # Web dashboard is the primary surface; the CLI/TUI still work if exec'd in.
+  interface: cli

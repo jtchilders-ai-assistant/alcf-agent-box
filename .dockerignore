@@ -1,0 +1,14 @@
+# Keep the build context small and reproducible.
+.git
+.gitignore
+**/__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+# Local dev artifacts that must never leak into the image
+*.log
+tokens.json
+.globus/
+# Editor cruft
+.vscode/
+.idea/

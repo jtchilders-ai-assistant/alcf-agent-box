@@ -1,0 +1,43 @@
+name: Refresh ALCF docs snapshot
+
+# Fetches the latest ALCF user documentation into docs/ and commits any changes.
+# Runs nightly (before the image build cron) and on manual dispatch. Keeping the
+# docs snapshot in-repo means the image build is reproducible and the docs are
+# never more than ~a day stale.
+
+on:
+  schedule:
+    - cron: "5 3 * * *"       # 03:05 UTC, before build.yml at 03:17
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install requests
+
+      - name: Fetch docs
+        run: python scripts/fetch_docs.py
+
+      - name: Commit changes
+        run: |
+          git config user.name  "alcf-agent-bot"
+          git config user.email "alcf-agent-bot@users.noreply.github.com"
+          if [[ -n "$(git status --porcelain docs/)" ]]; then
+            git add docs/
+            git commit -m "chore(docs): refresh ALCF docs snapshot ($(date -u +%Y-%m-%d))"
+            git push
+          else
+            echo "No doc changes."
+          fi
