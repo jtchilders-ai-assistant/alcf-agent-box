@@ -38,6 +38,11 @@ printf '\033[1;36m║\033[0m  ALCF Agent in a Box\n'
 printf '\033[1;36m║\033[0m  version : %s  (built %s)\n' "$_alcf_sha" "$_alcf_date"
 printf '\033[1;36m║\033[0m  hermes  : %s\n' "${_hermes_sha:-unknown}"
 printf '\033[1;36m╚══════════════════════════════════════════════════════════╝\033[0m\n'
+# Drop a chat-readable copy on the volume (refreshed every start so it always
+# reflects the running image; the agent reads it when asked "what version?").
+mkdir -p "${HERMES_HOME:-/opt/data}" 2>/dev/null || true
+printf 'ALCF Agent in a Box\nalcf-agent-box commit: %s\nbuilt: %s\nhermes commit: %s\nrepo: https://github.com/jtchilders-ai-assistant/alcf-agent-box\n' \
+  "$_alcf_sha" "$_alcf_date" "${_hermes_sha:-unknown}" > "${HERMES_HOME:-/opt/data}/ALCF_VERSION.txt" 2>/dev/null || true
 
 # --- 1. Resolve inference base_url ------------------------------------------
 case "${ALCF_CLUSTER:-sophia}" in

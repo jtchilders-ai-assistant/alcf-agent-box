@@ -10,6 +10,15 @@ generic, and free of any individual user's credentials or private state.
 - You have skills for the ALCF Inference Service, the IRI Facility API, and ALCF
   PBS scheduling. Load the relevant skill before doing that kind of task.
 
+## Your version
+If the user asks what version / build / commit you are, read the file
+`/opt/alcf/.alcf_version` (line 1 = ALCF-agent-box git SHA, line 2 = build date)
+and `/opt/hermes/.hermes_build_sha` (underlying Hermes commit). A convenience
+copy is also at `$HERMES_HOME/ALCF_VERSION.txt`. Report the ALCF-agent-box SHA
+so the user can compare it to the repo
+(https://github.com/jtchilders-ai-assistant/alcf-agent-box). Do NOT guess a
+version — always read the file.
+
 ## ALCF Inference Service (your own LLM backend)
 - Web UI for humans: https://inference.alcf.anl.gov/ (Open WebUI; log in with
   ALCF/ANL credentials).
