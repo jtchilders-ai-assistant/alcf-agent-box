@@ -1,0 +1,35 @@
+# Caddy TLS terminator for the ALCF Agent dashboard.
+#
+# Why: the dashboard's chat is an xterm terminal that uses the browser Clipboard
+# API (navigator.clipboard.readText/writeText) for copy/paste. That API is gated
+# to "secure contexts". Plain http://<host>:8787 is NOT a secure context (except
+# the localhost special-case, which is fragile across hostnames/proxies), so
+# Chrome blocks paste. Serving the dashboard over HTTPS makes it a secure
+# context everywhere and copy/paste works.
+#
+# Caddy auto-generates a local self-signed cert (the browser shows a one-time
+# "not private" warning you click through — expected for a local self-signed
+# cert). It listens on the public dashboard port and reverse-proxies to the
+# dashboard running on loopback inside the container.
+#
+# ${ALCF_DASHBOARD_PORT} and ${ALCF_DASHBOARD_INTERNAL_PORT} are substituted by
+# the entrypoint at start.
+
+{
+	# No email / no ACME — we only use Caddy's internal (self-signed) CA here.
+	auto_https disable_redirects
+	admin off
+	# Serve a cert even when the client sends no/unknown SNI (e.g. hitting
+	# the container by IP): fall back to the localhost cert.
+	default_sni localhost
+}
+
+# Bind explicit local hostnames so Caddy's internal CA pre-issues certs for
+# them (a bare ":port" site can fail the TLS handshake with 'internal error'
+# because no cert matches the SNI/IP). localhost covers the documented
+# https://localhost:PORT entry point; 127.0.0.1 covers IP access.
+https://localhost:${ALCF_DASHBOARD_PORT}, https://127.0.0.1:${ALCF_DASHBOARD_PORT} {
+	tls internal
+	# WebSocket + streaming friendly; the dashboard chat uses a WS PTY.
+	reverse_proxy 127.0.0.1:${ALCF_DASHBOARD_INTERNAL_PORT}
+}

@@ -24,6 +24,15 @@ FROM ${HERMES_BASE}
 USER root
 
 # ---------------------------------------------------------------------------
+# 0. Caddy (TLS terminator). The dashboard chat's copy/paste uses the browser
+#    Clipboard API, which browsers gate to HTTPS ("secure context"). Caddy
+#    serves the dashboard over HTTPS with a local self-signed cert so paste
+#    works. Single static multi-arch binary copied from the official image.
+# ---------------------------------------------------------------------------
+COPY --from=caddy:2 /usr/bin/caddy /usr/bin/caddy
+COPY config/Caddyfile /opt/alcf/Caddyfile
+
+# ---------------------------------------------------------------------------
 # 1. Apply the strip_tool_message_name patch to the installed Hermes source.
 #    git is present in the base image; `patch` is not. Applied against
 #    /opt/hermes which is a git-tracked install tree.
@@ -64,8 +73,11 @@ ENV ALCF_MODEL=openai/gpt-oss-120b \
     ALCF_CLUSTER=sophia \
     ALCF_MAX_TOKENS=2048 \
     ALCF_DASHBOARD_PORT=8787 \
+    ALCF_DASHBOARD_INTERNAL_PORT=9119 \
     ALCF_ENABLE_IRI=1 \
-    HERMES_HOME=/opt/data
+    HERMES_HOME=/opt/data \
+    XDG_DATA_HOME=/opt/data/.local/share \
+    XDG_CONFIG_HOME=/opt/data/.config
 
 EXPOSE 8787
 

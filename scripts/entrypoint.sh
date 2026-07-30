@@ -122,9 +122,40 @@ fi
   done
 ) &
 
-# --- 7. Launch the web dashboard --------------------------------------------
-log "Starting web chat at http://localhost:${ALCF_DASHBOARD_PORT:-8787}"
-exec hermes dashboard \
-  --host 0.0.0.0 \
-  --port "${ALCF_DASHBOARD_PORT:-8787}" \
-  --no-open
+# --- 7. Launch: dashboard on loopback, Caddy (HTTPS) on the public port ------
+# The dashboard chat's copy/paste needs a browser "secure context", so we serve
+# it over HTTPS via Caddy (self-signed local cert). The dashboard itself binds
+# 127.0.0.1:<internal>, and Caddy terminates TLS on the public port and proxies.
+PUB_PORT="${ALCF_DASHBOARD_PORT:-8787}"
+INT_PORT="${ALCF_DASHBOARD_INTERNAL_PORT:-9119}"
+mkdir -p "$XDG_DATA_HOME" "$XDG_CONFIG_HOME" 2>/dev/null || true
+
+log "Starting dashboard (internal) on 0.0.0.0:${INT_PORT} (auth gate ON)"
+# Bind 0.0.0.0 so Hermes engages the auth gate (loopback bind would skip it).
+# Only the public TLS port is published from the container, so the internal
+# port is not directly reachable from the host — Caddy proxies to it.
+hermes dashboard --host 0.0.0.0 --port "$INT_PORT" --no-open &
+DASH_PID=$!
+
+# Wait for the dashboard to come up (up to ~60s) before starting the proxy.
+for i in $(seq 1 60); do
+  if curl -sf -o /dev/null "http://127.0.0.1:${INT_PORT}/api/health" 2>/dev/null; then
+    break
+  fi
+  if ! kill -0 "$DASH_PID" 2>/dev/null; then
+    err "Dashboard exited during startup."; exit 1
+  fi
+  sleep 1
+done
+
+# Render the Caddyfile ports and launch Caddy on the public port (foreground).
+export ALCF_DASHBOARD_PORT="$PUB_PORT" ALCF_DASHBOARD_INTERNAL_PORT="$INT_PORT"
+"$PY" - "$ALCF_DIR/Caddyfile" /opt/data/Caddyfile <<'PYEOF'
+import os, sys, string
+src, dst = sys.argv[1], sys.argv[2]
+open(dst, "w").write(string.Template(open(src).read()).safe_substitute(os.environ))
+PYEOF
+
+log "Web chat ready at https://localhost:${PUB_PORT}  (self-signed cert — click through the browser warning once)"
+log "Login: user=${ALCF_DASHBOARD_USER}  (password you set via ALCF_DASHBOARD_PASSWORD)"
+exec caddy run --config /opt/data/Caddyfile --adapter caddyfile

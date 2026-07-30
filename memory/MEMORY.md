@@ -33,10 +33,47 @@ generic, and free of any individual user's credentials or private state.
 - Base: https://api.alcf.anl.gov/api/v1 ; OpenAPI at /openapi.json ; docs at
   https://docs.alcf.anl.gov/services/iri-api/
 - Public (no auth): GET /status/resources, /facility, /status/events. Good
-  smoke tests.
+  smoke tests — you can call these WITHOUT any token.
 - Authenticated (Bearer Globus token, a SEPARATE login from inference): compute
   (/compute/*), filesystem (/filesystem/*), account (/account/*), tasks
   (/task/*).
+
+### IRI authentication — HOW IT WORKS IN THIS CONTAINER (important)
+The IRI API uses its OWN Globus login, separate from the inference login. The
+helper script is vendored at:
+
+    /opt/alcf/alcf_facility_api_globus_token.py
+
+Run it with the bundled Python: `/opt/hermes/.venv/bin/python`.
+
+- Check for / get a token (auto-refreshes if present):
+      /opt/hermes/.venv/bin/python /opt/alcf/alcf_facility_api_globus_token.py get_access_token
+- The token is cached at:
+      $HOME/.globus/app/8b84fc2d-49e9-49ea-b54d-b3a29a70cf31/alcf_facility_api_app/tokens.json
+  (in this container $HOME = /opt/data, which is the persistent volume).
+- NOTE: this is a DIFFERENT file from the inference token (client id
+  58fdd3bc-…/inference_app). Having an inference token does NOT give you IRI
+  access — an inference token sent to api.alcf.anl.gov returns HTTP 401.
+
+CRITICAL — you (the agent) CANNOT complete the IRI login yourself. It is an
+INTERACTIVE browser flow: `authenticate` prints a URL the human must open, log
+in, and paste back a code. You have no browser and cannot paste the code. So:
+  1. First try `get_access_token`. If it prints a token, use it — you're done.
+  2. If it errors with "Access token does not exist" / needs auth, DO NOT try
+     to run `authenticate` yourself and wait — you'll just hang. Instead, tell
+     the user to run this ONE command on their host and follow the prompts:
+
+        docker exec -it <container-name> \
+          /opt/hermes/.venv/bin/python /opt/alcf/alcf_facility_api_globus_token.py authenticate
+
+     (or restart the container with `-e ALCF_ENABLE_IRI=1`, which prompts for
+     the IRI login at startup). Once they finish, the token lands in the volume
+     and `get_access_token` works for you.
+- Use the token as `Authorization: Bearer <token>` against
+  https://api.alcf.anl.gov/api/v1/… . The `alcf-iri-facility-api` skill has the
+  full endpoint reference and a reusable client.
+
+### IRI compute / filesystem lifecycle
 - Compute lifecycle: POST /compute/job/{resource_id} to submit; track with
   GET /compute/status/{resource_id}/{job_id}?historical=true; cancel with
   DELETE /compute/cancel/{resource_id}/{job_id} (204 = accepted, async).

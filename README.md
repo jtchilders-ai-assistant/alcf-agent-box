@@ -38,18 +38,31 @@ On first run the container will:
 2. *(Optional, for job submission)* Ask you to authenticate to the **IRI
    Facility API** — a **separate** Globus login. Set `-e ALCF_ENABLE_IRI=0` to
    skip it and use chat only.
-3. Launch the web chat at <http://localhost:8787>. Log in with username `alcf`
-   (override with `-e ALCF_DASHBOARD_USER=...`) and the password you set. If you
-   don't set `ALCF_DASHBOARD_PASSWORD`, the container generates one and prints it
-   at startup.
+3. Launch the web chat at **<https://localhost:8787>** (note **https**). Your
+   browser will show a one-time "not private" warning because the container uses
+   a **self-signed certificate** — click **Advanced → proceed to localhost**.
+   (HTTPS is required so the chat's copy/paste works — browsers only allow
+   clipboard access on secure origins.) Log in with username `alcf` (override
+   with `-e ALCF_DASHBOARD_USER=...`) and the password you set. If you don't set
+   `ALCF_DASHBOARD_PASSWORD`, the container generates one and prints it at
+   startup.
 
 The single `alcf-agent-home` volume persists your Globus tokens **and** the
 agent's memory across restarts, so you only log in occasionally (tokens last 48h
 and auto-refresh; a full re-auth is required every 30 days).
 
-> **Security:** the dashboard binds `0.0.0.0` inside the container (so `-p`
-> works) and therefore requires an auth gate — that's why a password is
-> mandatory. Keep the published port bound to localhost.
+> **Security:** the dashboard runs behind a built-in **Caddy HTTPS** proxy
+> (self-signed local cert) so the chat's clipboard works, and it requires the
+> username/password auth gate. Keep the published port bound to localhost.
+>
+> **IRI job submission:** the IRI Facility API uses a **separate** Globus login
+> from inference. If you skipped it at startup (or the agent reports it can't
+> find IRI credentials), run this once and follow the prompts:
+> ```bash
+> docker exec -it <container> \
+>   /opt/hermes/.venv/bin/python /opt/alcf/alcf_facility_api_globus_token.py authenticate
+> ```
+> The token is stored in the `alcf-agent-home` volume, so it persists.
 >
 > **Network:** the ALCF Inference Service endpoint (`inference-api.alcf.anl.gov`)
 > is public-facing, so this works from a laptop off the ALCF network. Some IRI
