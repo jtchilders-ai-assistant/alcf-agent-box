@@ -38,8 +38,10 @@ agent:
     - yuanbao
 
 memory:
-  # Local, on-disk memory persisted via the mounted ~/.hermes volume.
-  provider: mnemosyne
+  # Built-in on-disk memory (MEMORY.md/USER.md), persisted via the /opt/data
+  # volume, is always active — no external provider needed. (Do NOT set
+  # provider: mnemosyne here; that backend is not in the base image.)
+  provider: none
 
 display:
   # Web dashboard is the primary surface; the CLI/TUI still work if exec'd in.
@@ -54,3 +56,35 @@ dashboard:
   basic_auth:
     username: "${ALCF_DASHBOARD_USER}"
     password_hash: "${ALCF_DASHBOARD_PASSWORD_HASH}"
+
+# Curated switchable models. The ALCF gateway does NOT serve the standard
+# OpenAI `/v1/models` path (404), so we declare a hand-picked model list here
+# instead of relying on live discovery. All entries share the same endpoint +
+# Globus token, so switching is just a different `model` value.
+#
+# In the web chat model dropdown (or `/model <id>` in chat), pick any of these.
+# The full live catalog is 40+ models (incl. embeddings + science models like
+# AuroraGPT/GenSLM); ask the agent "what models are on ALCF inference?" and it
+# will query the service directly.
+#
+# NOTE: gpt-oss-* are REASONING models (hidden reasoning consumes max_tokens);
+# the non-reasoning models (llama/gemma/mistral/nemotron) feel snappier for
+# plain chat. Cold models can take 10-15 min to load on first request.
+custom_providers:
+  - name: alcf-inference
+    base_url: "${ALCF_BASE_URL}"
+    api_key: "${ALCF_ACCESS_TOKEN}"
+    # Disable live /v1/models discovery — the ALCF gateway 404s that path.
+    discover_models: false
+    models:
+      - openai/gpt-oss-120b
+      - openai/gpt-oss-20b
+      - meta-llama/Llama-3.3-70B-Instruct
+      - meta-llama/Meta-Llama-3.1-8B-Instruct
+      - meta-llama/Llama-4-Maverick-17B-128E-Instruct
+      - meta-llama/Llama-4-Scout-17B-16E-Instruct
+      - google/gemma-4-31B-it
+      - mistralai/Mixtral-8x22B-Instruct-v0.1
+      - mistralai/Mistral-Large-Instruct-2407
+      - nvidia/nemotron-3-super-120b
+      - argonne/AuroraGPT-IT-v4-0125
