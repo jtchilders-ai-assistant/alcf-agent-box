@@ -131,6 +131,30 @@ the file tool) design is backend-agnostic, needs no extra infrastructure, and
 works out of the box. To add retrieval later, configure an external memory
 provider (`hermes memory setup`) and ingest `docs/` into it.
 
+## Switching models
+
+The ALCF Inference Service serves 40+ models, but its gateway doesn't expose the
+standard OpenAI `/v1/models` path, so the image ships a **curated switchable
+list** (in `config/config.template.yaml` under `custom_providers`). In the web
+chat, click the **MODEL** selector → **alcf-inference** and pick one:
+
+- `openai/gpt-oss-120b` (default), `openai/gpt-oss-20b` — reasoning models
+- `meta-llama/Llama-3.3-70B-Instruct`, `Meta-Llama-3.1-8B-Instruct`,
+  `Llama-4-Maverick-…`, `Llama-4-Scout-…`
+- `google/gemma-4-31B-it`, `mistralai/Mixtral-8x22B-…`,
+  `mistralai/Mistral-Large-…`, `nvidia/nemotron-3-super-120b`
+- `argonne/AuroraGPT-IT-v4-0125` (Argonne's own model)
+
+All share the same endpoint + Globus token, so switching is instant (a cold
+model may take 10-15 min to load on its first request). The **gpt-oss** models
+are *reasoning* models (hidden reasoning consumes the token budget); the
+non-reasoning models feel snappier for plain chat.
+
+For the **full live catalog** (embeddings, GenSLM science models, everything),
+just ask the agent: *"what models are available on ALCF inference?"* — it queries
+the service directly via its `alcf-inference-service` skill. To add more to the
+dropdown, edit the `models:` list in the config template and rebuild.
+
 ---
 
 ## Development
