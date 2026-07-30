@@ -1,23 +1,24 @@
 #!/usr/bin/env bash
-# ALCF Agent container entrypoint.
+# ALCF Agent container entrypoint (Option A: on top of nousresearch/hermes-agent).
 #
-# Responsibilities:
 #   1. Resolve the ALCF inference base_url from ALCF_CLUSTER.
 #   2. First-run: authenticate to the ALCF Inference Service (Globus).
-#      Optional: authenticate to the IRI Facility API (separate Globus login).
-#   3. Render the Hermes config template with a fresh inference access token.
-#   4. Seed skills + curated memory into ~/.hermes (idempotent).
-#   5. Start a background token-refresh loop (tokens expire in 48h).
+#      Optional: authenticate to the IRI Facility API (a SEPARATE Globus login).
+#   3. Render the Hermes config with a fresh inference access token (Python, so
+#      no envsubst dependency).
+#   4. Seed skills + curated MEMORY.md into $HERMES_HOME (idempotent).
+#   5. Background token-refresh loop (tokens last 48h; refresh every 6h).
 #   6. Launch the Hermes web dashboard (the local web chat).
 #
-# The ~/.hermes and ~/.globus volumes persist tokens + memory across restarts,
-# so steps 1-2 are skipped once tokens exist.
+# $HERMES_HOME (/opt/data) and ~/.globus persist across restarts, so steps 1-2
+# are skipped once tokens exist.
 set -euo pipefail
 
 ALCF_DIR=/opt/alcf
 INFER_AUTH="$ALCF_DIR/inference_auth_token.py"
 IRI_AUTH="$ALCF_DIR/alcf_facility_api_globus_token.py"
-PY=/opt/venv/bin/python
+PY=/opt/hermes/.venv/bin/python
+HERMES_HOME="${HERMES_HOME:-/opt/data}"
 CONFIG_OUT="$HERMES_HOME/config.yaml"
 
 log() { printf '\033[36m[alcf-agent]\033[0m %s\n' "$*"; }
@@ -34,11 +35,7 @@ export ALCF_BASE_URL
 mkdir -p "$HERMES_HOME"
 
 # --- 2. First-run Globus auth (interactive, idempotent) ---------------------
-# The helper stores tokens under ~/.globus; if a valid token already exists it
-# returns one without prompting, so this is safe to run every start.
-authed_inference() {
-  "$PY" "$INFER_AUTH" get_access_token >/dev/null 2>&1
-}
+authed_inference() { "$PY" "$INFER_AUTH" get_access_token >/dev/null 2>&1; }
 
 if ! authed_inference; then
   log "First-time setup: authenticate to the ALCF Inference Service."
@@ -66,7 +63,7 @@ if [[ "${ALCF_ENABLE_IRI:-1}" == "1" ]]; then
   fi
 fi
 
-# --- 3. Render config -------------------------------------------------------
+# --- 3. Render config (Python; no envsubst in the base image) ---------------
 render_config() {
   local token
   token="$("$PY" "$INFER_AUTH" get_access_token)"
@@ -74,7 +71,14 @@ render_config() {
   ALCF_BASE_URL="$ALCF_BASE_URL" \
   ALCF_MODEL="${ALCF_MODEL:-openai/gpt-oss-120b}" \
   ALCF_MAX_TOKENS="${ALCF_MAX_TOKENS:-2048}" \
-    envsubst < "$ALCF_DIR/config.template.yaml" > "$CONFIG_OUT"
+  "$PY" - "$ALCF_DIR/config.template.yaml" "$CONFIG_OUT" <<'PYEOF'
+import os, sys, string
+src, dst = sys.argv[1], sys.argv[2]
+tmpl = open(src, encoding="utf-8").read()
+# Substitute ${VAR} placeholders from the environment; leave unknown ones as-is.
+out = string.Template(tmpl).safe_substitute(os.environ)
+open(dst, "w", encoding="utf-8").write(out)
+PYEOF
 }
 render_config
 log "Config rendered -> $CONFIG_OUT (cluster=$ALCF_CLUSTER model=${ALCF_MODEL:-openai/gpt-oss-120b})"
@@ -83,9 +87,8 @@ log "Config rendered -> $CONFIG_OUT (cluster=$ALCF_CLUSTER model=${ALCF_MODEL:-o
 mkdir -p "$HERMES_HOME/skills/research"
 cp -rn "$ALCF_DIR/skills/." "$HERMES_HOME/skills/research/" 2>/dev/null || true
 
-# Seed the curated ALCF knowledge base into built-in memory (MEMORY.md), which
-# Hermes always reads and injects every turn — backend-agnostic, no import step.
-# Only seed if the user hasn't already got a MEMORY.md (never clobber edits).
+# Built-in MEMORY.md is backend-agnostic and injected every turn. Seed only if
+# the user hasn't already got one (never clobber their edits).
 if [[ -f "$ALCF_DIR/memory/MEMORY.md" && ! -f "$HERMES_HOME/MEMORY.md" ]]; then
   cp "$ALCF_DIR/memory/MEMORY.md" "$HERMES_HOME/MEMORY.md"
   log "Seeded ALCF knowledge base into MEMORY.md"

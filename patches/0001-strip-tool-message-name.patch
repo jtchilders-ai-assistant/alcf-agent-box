@@ -1,0 +1,102 @@
+diff --git a/agent/transports/chat_completions.py b/agent/transports/chat_completions.py
+index 07f767367..3d7bc8c8b 100644
+--- a/agent/transports/chat_completions.py
++++ b/agent/transports/chat_completions.py
+@@ -18,6 +18,55 @@ from agent.transports.base import ProviderTransport
+ from agent.transports.types import NormalizedResponse, ToolCall, Usage
+ 
+ 
++# ── Config-gated: strip ``name`` from tool-result messages ──────────────────
++# The OpenAI Chat Completions schema *permits* a ``name`` field on
++# ``role: "tool"`` messages, and Hermes emits it (see
++# ``make_tool_result_message()``). Permissive providers (OpenAI, OpenRouter,
++# Anthropic) accept or ignore it. But some strict OpenAI-compatible gateways —
++# notably the ALCF Inference Service vLLM gateway
++# (``inference-api.alcf.anl.gov``) — validate the tool-message schema with
++# ``extra="forbid"`` and reject any payload containing ``name`` on a tool
++# message:
++#   HTTP 422 {"type":"extra_forbidden","loc":["body","payload","messages",N,"name"]}
++# That breaks the SECOND turn of any agentic (tool-using) session while plain
++# chat still works, which makes it a silent, confusing failure.
++#
++# Because ``name`` is a *valid* field for compliant providers, we must NOT
++# strip it unconditionally (doing so could regress providers that key on it).
++# Instead the strip is opt-in via config so a user pointing Hermes at such a
++# gateway can enable it, and everyone else is unaffected:
++#
++#   model:
++#     strip_tool_message_name: true
++#
++# The flag is read once and cached (this runs on the hot per-call path), and
++# resolution failures fall back to the safe default (do not strip).
++_STRIP_TOOL_MESSAGE_NAME: bool | None = None
++
++
++def _strip_tool_message_name_enabled() -> bool:
++    """Return whether ``name`` should be dropped from tool-result messages.
++
++    Reads ``model.strip_tool_message_name`` from config (default False) and
++    caches the result. Any failure resolving config returns False so the wire
++    format is unchanged for every provider that doesn't opt in.
++    """
++    global _STRIP_TOOL_MESSAGE_NAME
++    if _STRIP_TOOL_MESSAGE_NAME is not None:
++        return _STRIP_TOOL_MESSAGE_NAME
++    enabled = False
++    try:
++        from hermes_cli.config import cfg_get, load_config
++
++        enabled = bool(
++            cfg_get(load_config(), "model", "strip_tool_message_name", default=False)
++        )
++    except Exception:
++        enabled = False
++    _STRIP_TOOL_MESSAGE_NAME = enabled
++    return enabled
++
++
+ def _reasoning_config_for_model(model: str, reasoning_config: dict | None) -> dict | None:
+     """Return the model's wire-compatible reasoning config."""
+     if not isinstance(reasoning_config, dict):
+@@ -177,6 +226,10 @@ class ChatCompletionsTransport(ProviderTransport):
+         strip_extra_content = not _model_consumes_thought_signature(
+             kwargs.get("model")
+         )
++        # Opt-in (``model.strip_tool_message_name``): drop ``name`` from
++        # ``role: tool`` messages for strict gateways (e.g. ALCF Inference
++        # Service) that reject it with HTTP 422 ``extra_forbidden``.
++        strip_tool_name = _strip_tool_message_name_enabled()
+         needs_sanitize = False
+         for msg in messages:
+             if not isinstance(msg, dict):
+@@ -191,6 +244,13 @@ class ChatCompletionsTransport(ProviderTransport):
+             ):
+                 needs_sanitize = True
+                 break
++            if (
++                strip_tool_name
++                and msg.get("role") == "tool"
++                and "name" in msg
++            ):
++                needs_sanitize = True
++                break
+             if any(isinstance(k, str) and k.startswith("_") for k in msg):
+                 needs_sanitize = True
+                 break
+@@ -240,6 +300,16 @@ class ChatCompletionsTransport(ProviderTransport):
+                 out_msg.pop("timestamp", None)  # #47868 — leak into strict providers
+                 out_msg.pop("api_content", None)  # persist-what-you-send sidecar
+ 
++            # Opt-in strip of ``name`` on tool-result messages for strict
++            # gateways (ALCF Inference Service) that reject it with HTTP 422.
++            # ``name`` is a valid Chat Completions field, so this is gated on
++            # ``model.strip_tool_message_name`` and defaults off.
++            if (
++                strip_tool_name
++                and msg.get("role") == "tool"
++                and "name" in msg
++            ):
++                mutable_msg().pop("name", None)
+ 
+             # Drop all Hermes-internal scaffolding markers (``_``-prefixed).
+             # OpenAI's message schema has no ``_``-prefixed fields, so this

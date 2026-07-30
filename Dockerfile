@@ -1,69 +1,77 @@
-# ALCF Agent in a Box
+# ALCF Agent in a Box  (Option A: extend the official Hermes image)
 #
-# Layers, cheap-to-expensive so edits to skills/docs/config don't rebuild the
-# world:
-#   1. base OS + system deps
-#   2. Hermes Agent (patched fork, pinned) + Python deps  <- heavy, rarely changes
-#   3. ALCF Globus auth helpers                            <- rarely changes
-#   4. skills / memory seed / docs / config / entrypoint   <- changes often
+# We build ON TOP of the official, hardened Hermes image
+# (nousresearch/hermes-agent) rather than reinventing its build. That image
+# already handles the fixed SQLite build, s6-overlay supervision, editable
+# install, config/skills seeding (docker/stage2-hook.sh), the /opt/data volume,
+# and the web dashboard. We add exactly three things:
+#
+#   1. A one-file patch enabling model.strip_tool_message_name (required because
+#      the ALCF vLLM gateway rejects `name` on role:tool messages -> HTTP 422).
+#      Upstreamable; once merged this layer becomes a no-op and can be deleted.
+#   2. ALCF Globus auth helpers (inference + IRI) + their Python deps.
+#   3. ALCF content baked as image defaults: skills, curated MEMORY.md, a docs
+#      snapshot, the config template, and our entrypoint that does first-run
+#      Globus auth, renders the config with a fresh token, and launches the
+#      dashboard.
+#
+# Pin the base by tag for reproducibility; bump deliberately.
+ARG HERMES_BASE=nousresearch/hermes-agent:latest
+FROM ${HERMES_BASE}
 
-FROM python:3.11-slim AS base
-
-ARG DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        git curl ca-certificates tini gettext-base \
-    && rm -rf /var/lib/apt/lists/*
-
-# Non-root user. Home is where ~/.hermes and ~/.globus live (mount volumes here).
-RUN useradd --create-home --shell /bin/bash --uid 1000 alcf
-ENV HOME=/home/alcf \
-    HERMES_HOME=/home/alcf/.hermes \
-    PATH=/home/alcf/.local/bin:/opt/venv/bin:$PATH
-
-# ---------------------------------------------------------------------------
-# 2. Hermes Agent — install the PATCHED fork at a pinned ref.
-#    The patch adds model.strip_tool_message_name (needed for ALCF tool use).
-# ---------------------------------------------------------------------------
-ARG HERMES_REPO=https://github.com/jtchilders-ai-assistant/hermes-agent.git
-ARG HERMES_REF=feat/strip-tool-message-name
-
-RUN python -m venv /opt/venv \
-    && /opt/venv/bin/pip install --no-cache-dir --upgrade pip \
-    && git clone --depth 1 --branch "${HERMES_REF}" "${HERMES_REPO}" /opt/hermes-agent \
-    && /opt/venv/bin/pip install --no-cache-dir /opt/hermes-agent
+# The base image sets USER/ENV/ENTRYPOINT for the stock Hermes runtime. We need
+# root to patch the (root-owned, read-only) install tree and drop in content.
+USER root
 
 # ---------------------------------------------------------------------------
-# 3. ALCF Globus auth helpers (inference + IRI). Vendored so the image works
-#    offline-ish and pins a known-good version of each helper script.
+# 1. Apply the strip_tool_message_name patch to the installed Hermes source.
+#    git is present in the base image; `patch` is not. Applied against
+#    /opt/hermes which is a git-tracked install tree.
 # ---------------------------------------------------------------------------
-RUN /opt/venv/bin/pip install --no-cache-dir globus-sdk openai requests
+COPY patches/0001-strip-tool-message-name.patch /tmp/alcf/0001.patch
+RUN cd /opt/hermes \
+    && git apply --unsafe-paths --directory=/opt/hermes /tmp/alcf/0001.patch \
+    && grep -q strip_tool_message_name agent/transports/chat_completions.py \
+    && echo "ALCF patch applied: strip_tool_message_name present" \
+    && rm -rf /tmp/alcf
+
+# ---------------------------------------------------------------------------
+# 2. ALCF Globus auth helpers + deps. The base image's venv is uv-managed
+#    (no pip binary), so install with `uv pip` into that interpreter. requests
+#    is already present in the base; globus-sdk is added here.
+# ---------------------------------------------------------------------------
+RUN uv pip install --python /opt/hermes/.venv/bin/python --no-cache globus-sdk requests
 COPY scripts/inference_auth_token.py /opt/alcf/inference_auth_token.py
 COPY scripts/alcf_facility_api_globus_token.py /opt/alcf/alcf_facility_api_globus_token.py
 
 # ---------------------------------------------------------------------------
-# 4. Content that changes often — kept last for fast rebuilds.
+# 3. ALCF content (changes most often -> last for cache friendliness).
+#    /opt/alcf is the staging area; the entrypoint copies skills + MEMORY.md
+#    into $HERMES_HOME (/opt/data) on first run so they land on the durable
+#    volume without clobbering user edits.
 # ---------------------------------------------------------------------------
-# Skills: how the agent talks to ALCF inference / IRI / PBS.
-COPY skills/ /opt/alcf/skills/
-# Curated, sanitized ALCF knowledge seed (imported into memory on first run).
-COPY memory/ /opt/alcf/memory/
-# Snapshot of ALCF user docs (refreshed nightly by CI).
-COPY docs/ /opt/alcf/docs/
-# Config template + entrypoint.
+COPY skills/  /opt/alcf/skills/
+COPY memory/  /opt/alcf/memory/
+COPY docs/    /opt/alcf/docs/
 COPY config/config.template.yaml /opt/alcf/config.template.yaml
 COPY scripts/entrypoint.sh /opt/alcf/entrypoint.sh
-RUN chmod +x /opt/alcf/entrypoint.sh && chown -R alcf:alcf /opt/alcf /home/alcf
+RUN chmod +x /opt/alcf/entrypoint.sh /opt/alcf/inference_auth_token.py \
+             /opt/alcf/alcf_facility_api_globus_token.py \
+    && chown -R hermes:hermes /opt/alcf
 
-USER alcf
-WORKDIR /home/alcf
-
+# ALCF defaults (override at `docker run` with -e).
 ENV ALCF_MODEL=openai/gpt-oss-120b \
     ALCF_CLUSTER=sophia \
     ALCF_MAX_TOKENS=2048 \
     ALCF_DASHBOARD_PORT=8787 \
-    ALCF_ENABLE_IRI=1
+    ALCF_ENABLE_IRI=1 \
+    HERMES_HOME=/opt/data
 
 EXPOSE 8787
 
-# tini reaps zombies (the dashboard spawns child processes).
-ENTRYPOINT ["/usr/bin/tini", "--", "/opt/alcf/entrypoint.sh"]
+# Our entrypoint does the ALCF first-run flow, then hands off to the stock
+# `hermes dashboard`. We run it as the non-root hermes user (the base image's
+# supervised services also drop to this user).
+USER hermes
+WORKDIR /opt/data
+ENTRYPOINT ["/opt/alcf/entrypoint.sh"]
