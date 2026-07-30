@@ -99,18 +99,40 @@ PYEOF
 render_config
 log "Config rendered -> $CONFIG_OUT (cluster=$ALCF_CLUSTER model=${ALCF_MODEL:-openai/gpt-oss-120b})"
 
-# --- 5. Seed skills + memory (idempotent) -----------------------------------
-mkdir -p "$HERMES_HOME/skills/research"
-cp -rn "$ALCF_DIR/skills/." "$HERMES_HOME/skills/research/" 2>/dev/null || true
+# --- 5. Seed / refresh skills + memory ---------------------------------------
+# ALCF skills and the knowledge base are IMAGE-MANAGED: we refresh them from the
+# image on every start so knowledge-base fixes land for users who keep their
+# existing volume — WITHOUT clobbering user edits. We track the checksum of what
+# we last wrote; if the on-disk copy still matches that (user hasn't touched it)
+# we overwrite with the image's newer version, otherwise we leave the user's
+# edited copy alone and log a note.
+STAMP_DIR="$HERMES_HOME/.alcf_seed_stamps"
+mkdir -p "$STAMP_DIR" "$HERMES_HOME/skills/research" "$HERMES_HOME/memories"
 
-# Built-in memory is loaded from $HERMES_HOME/memories/MEMORY.md (note the
-# `memories/` subdir — seeding to $HERMES_HOME/MEMORY.md is silently ignored).
-# Seed only if the user hasn't already got one (never clobber their edits).
-if [[ -f "$ALCF_DIR/memory/MEMORY.md" && ! -f "$HERMES_HOME/memories/MEMORY.md" ]]; then
-  mkdir -p "$HERMES_HOME/memories"
-  cp "$ALCF_DIR/memory/MEMORY.md" "$HERMES_HOME/memories/MEMORY.md"
-  log "Seeded ALCF knowledge base into memories/MEMORY.md"
-fi
+managed_seed() {  # $1=source file, $2=dest file, $3=label
+  local src="$1" dst="$2" label="$3" stamp
+  stamp="$STAMP_DIR/$(echo "$dst" | md5sum | cut -d' ' -f1).sha"
+  [[ -f "$src" ]] || return 0
+  if [[ ! -f "$dst" ]]; then
+    cp "$src" "$dst"; sha256sum "$src" | cut -d' ' -f1 > "$stamp"
+    log "Seeded $label"
+  elif [[ -f "$stamp" ]] && sha256sum -c <(echo "$(cat "$stamp")  $dst") >/dev/null 2>&1; then
+    # on-disk copy is byte-identical to what we last seeded => safe to refresh
+    if ! cmp -s "$src" "$dst"; then
+      cp "$src" "$dst"; sha256sum "$src" | cut -d' ' -f1 > "$stamp"
+      log "Updated $label from image"
+    fi
+  else
+    log "Kept your edited $label (image has a newer version at $src)"
+  fi
+}
+
+managed_seed "$ALCF_DIR/memory/MEMORY.md" "$HERMES_HOME/memories/MEMORY.md" "ALCF knowledge base (memories/MEMORY.md)"
+# Skills: refresh each SKILL.md tree wholesale when unmodified (skills are
+# reference material, not typically user-edited). Simple approach: mirror the
+# baked skills dir, overwriting — skills live under skills/research/ which is
+# image-owned here.
+cp -r "$ALCF_DIR/skills/." "$HERMES_HOME/skills/research/" 2>/dev/null || true
 
 # --- 6. Token refresh loop (tokens last 48h; refresh every 6h) --------------
 (

@@ -113,6 +113,42 @@ changing the token.
   success — the task can still fail (e.g. path allowlist).
 - Compute resources include Polaris, Crux, Aurora, Sophia; storage Home, Eagle.
 
+### VERIFIED hello-world recipe (tested end-to-end 2026-07-30) + gotchas
+Polaris resource_id = `55c1c993-1124-47f9-b823-514ba3849a9a`. A minimal working
+`POST /compute/job/{polaris_id}` body:
+```json
+{
+  "executable": "/bin/echo",
+  "arguments": ["Hello, World from IRI"],
+  "name": "iri_hello",
+  "stdout_path": "/home/<username>/iri_hello.out",
+  "stderr_path": "/home/<username>/iri_hello.err",
+  "resources": {"node_count": 1},
+  "attributes": {"duration": 300, "queue_name": "debug",
+                 "account": "<project>",
+                 "custom_attributes": {"filesystems": "home:eagle"}}
+}
+```
+Returns HTTP 200 with a PBS job id + state `queued`; poll it to `active` →
+`completed`. GOTCHAS that WILL bite you:
+- **`attributes.duration` is an INTEGER number of SECONDS** (e.g. `300` = 5 min).
+  A `"HH:MM:SS"` string gives HTTP 400 "unable to parse string as an integer".
+- **stdout/stderr paths must be on HOME or EAGLE, never on Polaris.** IRI
+  `/filesystem/*` ops (ls, mkdir, …) are ONLY supported on Home/Eagle — calling
+  them on the Polaris resource returns HTTP 400 "501: Polaris not supported
+  yet." So DO NOT try `filesystem/mkdir` on Polaris to make an output dir. The
+  user's `/home/<username>/` already exists — write there directly. For fs ops
+  use the Home resource id `6115bd2c-957a-4543-abff-5fae52992ff2` or Eagle
+  `1c3ad9d4-2e91-42bc-becb-72b1fde1235c`.
+- **COMPUTE endpoints DO work on Polaris** even though filesystem doesn't.
+- Get the user's project/account and username from `GET /account/projects`
+  (returns projects with `name` = the account and `user_ids` list) — don't ask
+  the user for these if you can look them up.
+- You do NOT need to build a venv or curl anything: the auth helper is baked at
+  `/opt/alcf/alcf_facility_api_globus_token.py` and its deps (globus-sdk,
+  requests) are already installed in `/opt/hermes/.venv`. Just run it with
+  `/opt/hermes/.venv/bin/python`.
+
 ## ALCF systems (orientation)
 - Polaris, Aurora, Crux — HPC clusters, jobs run under PBS.
 - Sophia — NVIDIA DGX A100 cluster; also hosts inference.
