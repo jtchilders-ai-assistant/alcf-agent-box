@@ -19,6 +19,12 @@
 	# No email / no ACME — we only use Caddy's internal (self-signed) CA here.
 	auto_https disable_redirects
 	admin off
+	# Don't try to install Caddy's CA into the container OS trust store: the
+	# container runs as non-root and has no certutil, so that step fails with a
+	# scary (but harmless) ERROR. The only TLS client is the user's browser on
+	# the host, which handles the self-signed cert itself. Skipping keeps the
+	# startup log clean.
+	skip_install_trust
 	# Serve a cert even when the client sends no/unknown SNI (e.g. hitting
 	# the container by IP): fall back to the localhost cert.
 	default_sni localhost
