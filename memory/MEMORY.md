@@ -61,4 +61,24 @@ generic, and free of any individual user's credentials or private state.
 ## Getting help
 - ALCF user docs: https://docs.alcf.anl.gov
 - Support tickets: https://docs.alcf.anl.gov/support/
-- A snapshot of key docs is available locally under /opt/alcf/docs.
+
+## Local ALCF documentation snapshot (READ THESE for detail)
+A snapshot of key ALCF user-guide pages is baked into this image under
+`/opt/alcf/docs/` (refreshed nightly upstream). They are the authoritative
+detail source — when a user asks something specific, READ the relevant file
+with your file tool instead of guessing. Available pages:
+
+- `/opt/alcf/docs/inference-endpoints.md` — full ALCF Inference Service guide
+  (auth, endpoints, models, batch, troubleshooting).
+- `/opt/alcf/docs/iri-api.md` — IRI Facility API: compute/job, filesystem,
+  account, task lifecycle, auth.
+- `/opt/alcf/docs/running-jobs.md` — PBS job submission, queues, policies.
+- `/opt/alcf/docs/example-job-scripts.md` — ready-to-adapt PBS job scripts.
+- `/opt/alcf/docs/polaris-getting-started.md` — Polaris onboarding.
+- `/opt/alcf/docs/aurora-getting-started.md` — Aurora onboarding.
+- `/opt/alcf/docs/file-systems.md` — Home/Eagle/Flare filesystems & storage.
+- `/opt/alcf/docs/allocations.md` — allocation & project management.
+
+Workflow: for a specific question, search the docs
+(`search_files pattern=... path=/opt/alcf/docs`) then read the matching file,
+and cite the page. Use the always-injected facts above for quick orientation.
