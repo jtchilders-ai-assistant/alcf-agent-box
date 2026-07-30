@@ -98,6 +98,23 @@ in the task, not the submit response — a submit can return 200 while the task 
 
 ## Pitfalls
 
+- **ONE token covers the whole API — there is NO separate "compute" scope.**
+  The auth script requests a scope whose name ends in `/filesystem`
+  (`https://auth.globus.org/scopes/6be511f6-…/filesystem`), but that SAME token
+  authorizes `/compute/*`, `/account/*`, and `/filesystem/*`. The OpenAPI spec
+  uses a single `HTTPBearer` security scheme with no per-endpoint scopes, and the
+  ALCF docs use this exact token for `POST /compute/job`. DO NOT invent a
+  compute scope or a second client id — an LLM seeing "filesystem" in the scope
+  string has been observed hallucinating a fake compute client id and telling
+  the user to edit the script. That is wrong.
+- **403 (error 1010) with a valid token is an AUTHZ/consent issue, not a scope
+  issue.** If `/account/projects` or `/compute/job` returns 403 while
+  `get_access_token` returns a fresh, non-expired token, it means the token needs
+  a full re-consent OR the identity lacks authorization/allocation. Fix: logout
+  at app.globus.org/logout, use incognito/cleared cache, and re-run
+  `alcf_facility_api_globus_token.py authenticate` (a FULL re-auth, not just
+  `get_access_token`). If it still 403s, it's an ALCF account/allocation problem
+  for ALCF support, not a token you can fix by changing scopes.
 - **`wget` is not on stock macOS** — the docs' `wget <url>` for the auth script fails on Macs.
   Use `curl -O <url>` (or `curl -sL <url> -o file.py`).
 - **A 200 on a filesystem submit is not success** — you MUST poll the task; it can still fail

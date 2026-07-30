@@ -73,6 +73,37 @@ in, and paste back a code. You have no browser and cannot paste the code. So:
   https://api.alcf.anl.gov/api/v1/… . The `alcf-iri-facility-api` skill has the
   full endpoint reference and a reusable client.
 
+### ONE token for the WHOLE IRI API — there is NO separate "compute" scope
+The token from `alcf_facility_api_globus_token.py` requests the scope
+`https://auth.globus.org/scopes/6be511f6-…/filesystem`. Despite the word
+"filesystem" in the scope name, this SAME token is used for `/compute/*`,
+`/account/*`, AND `/filesystem/*`. The IRI OpenAPI spec defines a single
+`HTTPBearer` security scheme with NO per-endpoint scope requirements, and the
+official ALCF docs use this exact token for `POST /compute/job` examples.
+
+DO NOT invent a "compute-scoped" token or a separate compute client id. There
+is no such thing. (A known failure mode: an LLM sees "filesystem" in the scope
+string and hallucinates that compute needs a different scope + a made-up client
+id like `e5d0c8a9-…`. That is WRONG — do not do this, and do not tell the user
+to edit the script to add a compute scope.)
+
+### Interpreting a 403 on IRI compute/account calls
+If `/account/projects` or `/compute/job/{resource_id}` returns HTTP 403
+(often "error code 1010") even though `get_access_token` returns a valid,
+non-expired token, the cause is NOT the scope. It means either:
+  (a) the token needs a FRESH consent (a cached/refreshed token can be
+      under-consented), or
+  (b) the ALCF identity/account isn't authorized for that operation, or lacks
+      membership/allocation on the target project.
+Per the ALCF docs, the fix for (a) is a FULL re-auth (not just get_access_token):
+tell the user to logout at https://app.globus.org/logout, use an incognito/
+cleared browser, and re-run:
+    docker exec -it <container> \
+      /opt/hermes/.venv/bin/python /opt/alcf/alcf_facility_api_globus_token.py authenticate
+If it still 403s after a clean re-auth, it is (b) — an ALCF account/allocation
+issue the user must resolve with ALCF support, not something you can fix by
+changing the token.
+
 ### IRI compute / filesystem lifecycle
 - Compute lifecycle: POST /compute/job/{resource_id} to submit; track with
   GET /compute/status/{resource_id}/{job_id}?historical=true; cancel with
