@@ -51,6 +51,37 @@ The single `alcf-agent-home` volume persists your Globus tokens **and** the
 agent's memory across restarts, so you only log in occasionally (tokens last 48h
 and auto-refresh; a full re-auth is required every 30 days).
 
+## Data & filesystem access (sandboxed by design)
+
+**The agent cannot see or touch your laptop's files.** It runs fully inside the
+container. Its file and terminal tools only reach the container's own
+filesystem:
+
+- `/opt/data` — the one **named Docker volume** (`alcf-agent-home`). This is
+  Docker-managed storage, **not** a folder in your home directory. It holds the
+  agent's config, memory, Globus tokens, and session history so they survive
+  restarts.
+- `/opt/alcf`, `/opt/hermes` — baked-in ALCF content and the agent code.
+
+Nothing under your host home (`~/Documents`, `~/anl`, etc.) is bind-mounted, so
+the agent can't read or modify your local files, and `--rm` discards the
+container on exit (only the named volume persists). This is intentional: a
+support tool shouldn't have ambient access to a user's machine.
+
+If you *want* the agent to work with local files, add an explicit bind mount of
+a **dedicated** directory (never your whole home):
+
+```bash
+# creates/uses ~/alcf-work on your host, visible to the agent at /work
+docker run -it --rm -p 8787:8787 \
+  -e ALCF_DASHBOARD_PASSWORD='choose-a-password' \
+  -v alcf-agent-home:/opt/data \
+  -v "$HOME/alcf-work:/work" \
+  ghcr.io/jtchilders-ai-assistant/alcf-agent:latest
+```
+
+Then ask the agent to read/write under `/work`. Only that directory is exposed.
+
 > **Security:** the dashboard runs behind a built-in **Caddy HTTPS** proxy
 > (self-signed local cert) so the chat's clipboard works, and it requires the
 > username/password auth gate. Keep the published port bound to localhost.
