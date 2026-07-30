@@ -99,19 +99,30 @@ to edit the script to add a compute scope.)
 ### Interpreting a 403 on IRI compute/account calls
 If `/account/projects` or `/compute/job/{resource_id}` returns HTTP 403
 (often "error code 1010") even though `get_access_token` returns a valid,
-non-expired token, the cause is NOT the scope. It means either:
-  (a) the token needs a FRESH consent (a cached/refreshed token can be
-      under-consented), or
-  (b) the ALCF identity/account isn't authorized for that operation, or lacks
-      membership/allocation on the target project.
-Per the ALCF docs, the fix for (a) is a FULL re-auth (not just get_access_token):
-tell the user to logout at https://app.globus.org/logout, use an incognito/
-cleared browser, and re-run:
-    docker exec -it <container> \
-      /opt/hermes/.venv/bin/python /opt/alcf/alcf_facility_api_globus_token.py authenticate
-If it still 403s after a clean re-auth, it is (b) — an ALCF account/allocation
-issue the user must resolve with ALCF support, not something you can fix by
-changing the token.
+non-expired token, the cause is NOT the scope. Work through these IN ORDER:
+
+1. **Fresh consent** — a cached/refreshed token can be under-consented. Have the
+   user logout at https://app.globus.org/logout, use an incognito/cleared
+   browser, and re-run `authenticate` (a FULL re-auth, not just
+   `get_access_token`).
+2. **Wrong Globus identity (the most common real cause if re-auth doesn't fix
+   it).** The token is only accepted if the user logs in with the Globus
+   identity that is LINKED to their ALCF account — usually their ALCF/ANL
+   institutional identity. If they authenticate with a personal identity
+   (Google, ORCID, GitHub, etc.) they get a valid token that the facility API
+   rejects with 403/1010 because it can't map that identity to an ALCF user. At
+   the Globus login page, tell them to choose/link their **ALCF (ANL) identity**,
+   not a personal one.
+3. **Genuine account/allocation issue** — if it still 403s after (1) and (2),
+   it's an ALCF-side account↔identity mapping or allocation problem the user
+   must resolve with **ALCF support (support@alcf.anl.gov)** — it is NOT
+   something you can fix by changing the token, scope, or script.
+
+DO NOT loop on "re-auth in incognito" if the user has already tried it — escalate
+to the identity-linking check (2) and then ALCF support (3). (Verified
+2026-07-30: a properly ALCF-mapped identity gets 200 on /account/projects and
+can submit Polaris jobs; a 403 there is an identity/consent problem on the
+user's side, not an API or scope problem.)
 
 ### IRI compute / filesystem lifecycle
 - Compute lifecycle: POST /compute/job/{resource_id} to submit; track with
