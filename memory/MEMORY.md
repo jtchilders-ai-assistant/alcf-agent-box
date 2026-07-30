@@ -125,6 +125,22 @@ the User-Agent. (A genuinely token-related failure looks different: HTTP 401
 - Compute resources include Polaris, Crux, Aurora, Sophia; storage Home, Eagle.
 
 ### VERIFIED hello-world recipe (tested end-to-end 2026-07-30) + gotchas
+
+**FASTEST PATH — use the baked one-shot helper (do this FIRST for hello-world):**
+Instead of hand-rolling urllib calls, run the bundled script in ONE command:
+
+    /opt/hermes/.venv/bin/python /opt/alcf/iri_hello_world.py \
+        --project <project> --home /home/<username>
+
+It gets the token, submits to Polaris, polls to completion, and prints the
+result. Optional flags: `--executable`, `--args "Hello World"`, `--queue debug`,
+`--seconds 600`, `--nodes 1`. Do NOT reinvent this with dozens of `python3 -c`
+one-liners or a new venv — everything it needs (auth script, client with the
+Cloudflare User-Agent) is already installed. If you need something beyond a
+hello-world, use the bundled client `iri_api_client.py` (it also sets the
+User-Agent) rather than raw urllib.
+
+Manual recipe (only if the helper doesn't fit) —
 Polaris resource_id = `55c1c993-1124-47f9-b823-514ba3849a9a`. A minimal working
 `POST /compute/job/{polaris_id}` body:
 ```json

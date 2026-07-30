@@ -64,8 +64,9 @@ COPY memory/  /opt/alcf/memory/
 COPY docs/    /opt/alcf/docs/
 COPY config/config.template.yaml /opt/alcf/config.template.yaml
 COPY scripts/entrypoint.sh /opt/alcf/entrypoint.sh
+COPY scripts/iri_hello_world.py /opt/alcf/iri_hello_world.py
 RUN chmod +x /opt/alcf/entrypoint.sh /opt/alcf/inference_auth_token.py \
-             /opt/alcf/alcf_facility_api_globus_token.py \
+             /opt/alcf/alcf_facility_api_globus_token.py /opt/alcf/iri_hello_world.py \
     && chown -R hermes:hermes /opt/alcf
 
 # Bake the ALCF-agent-box git revision + build date so the container can print
@@ -77,7 +78,11 @@ RUN printf '%s\n%s\n' "${ALCF_GIT_SHA}" "${ALCF_BUILD_DATE}" > /opt/alcf/.alcf_v
     && chown hermes:hermes /opt/alcf/.alcf_version
 
 # ALCF defaults (override at `docker run` with -e).
-ENV ALCF_MODEL=openai/gpt-oss-120b \
+# Default model: a NON-reasoning model (Llama-3.3-70B) for steadier, faster
+# tool-use. gpt-oss-120b is a reasoning model that (a) burns the token budget on
+# hidden reasoning and (b) empirically thrashed/garbled under agentic load; it's
+# still one click away in the dashboard model switcher for users who want it.
+ENV ALCF_MODEL=meta-llama/Llama-3.3-70B-Instruct \
     ALCF_CLUSTER=sophia \
     ALCF_MAX_TOKENS=2048 \
     ALCF_DASHBOARD_PORT=8787 \
