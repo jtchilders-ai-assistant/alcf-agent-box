@@ -52,6 +52,13 @@ class IRI:
             url += "?" + urllib.parse.urlencode(params)
         data = json.dumps(body).encode() if body is not None else None
         req = urllib.request.Request(url, data=data, method=method)
+        # api.alcf.anl.gov sits behind Cloudflare, which BLOCKS the default
+        # Python-urllib User-Agent with HTTP 403 "error code: 1010" (a Cloudflare
+        # bot-block, NOT an auth/scope/allocation problem). Send a normal UA so
+        # the request is accepted — same as curl. (Verified 2026-07-30: identical
+        # token 403s with the default UA and 200s with this one.)
+        req.add_header("User-Agent", "alcf-iri-client/1.0")
+        req.add_header("Accept", "application/json")
         if auth and self.token:
             req.add_header("Authorization", f"Bearer {self.token}")
         if data is not None:

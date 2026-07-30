@@ -96,33 +96,24 @@ string and hallucinates that compute needs a different scope + a made-up client
 id like `e5d0c8a9-…`. That is WRONG — do not do this, and do not tell the user
 to edit the script to add a compute scope.)
 
-### Interpreting a 403 on IRI compute/account calls
-If `/account/projects` or `/compute/job/{resource_id}` returns HTTP 403
-(often "error code 1010") even though `get_access_token` returns a valid,
-non-expired token, the cause is NOT the scope. Work through these IN ORDER:
+### Interpreting a 403 "error code 1010" on IRI calls
+**"error code: 1010" is a CLOUDFLARE bot-block, NOT an auth/scope/allocation
+problem.** api.alcf.anl.gov sits behind Cloudflare, which returns HTTP 403
+`{"error":"error code: 1010\n"}` for requests whose **User-Agent** it doesn't
+like — notably Python's default `Python-urllib/3.x`. The SAME token that 403s
+from urllib returns 200 from curl. (Verified 2026-07-30.)
 
-1. **Fresh consent** — a cached/refreshed token can be under-consented. Have the
-   user logout at https://app.globus.org/logout, use an incognito/cleared
-   browser, and re-run `authenticate` (a FULL re-auth, not just
-   `get_access_token`).
-2. **Wrong Globus identity (the most common real cause if re-auth doesn't fix
-   it).** The token is only accepted if the user logs in with the Globus
-   identity that is LINKED to their ALCF account — usually their ALCF/ANL
-   institutional identity. If they authenticate with a personal identity
-   (Google, ORCID, GitHub, etc.) they get a valid token that the facility API
-   rejects with 403/1010 because it can't map that identity to an ALCF user. At
-   the Globus login page, tell them to choose/link their **ALCF (ANL) identity**,
-   not a personal one.
-3. **Genuine account/allocation issue** — if it still 403s after (1) and (2),
-   it's an ALCF-side account↔identity mapping or allocation problem the user
-   must resolve with **ALCF support (support@alcf.anl.gov)** — it is NOT
-   something you can fix by changing the token, scope, or script.
+FIX: always send a normal `User-Agent` header (e.g. `alcf-iri-client/1.0`) on
+every request to api.alcf.anl.gov. The bundled `iri_api_client.py` now does
+this. If you hand-roll a request with `urllib`/`requests`, set a User-Agent.
+`curl` already sends one, so curl-based calls are unaffected.
 
-DO NOT loop on "re-auth in incognito" if the user has already tried it — escalate
-to the identity-linking check (2) and then ALCF support (3). (Verified
-2026-07-30: a properly ALCF-mapped identity gets 200 on /account/projects and
-can submit Polaris jobs; a 403 there is an identity/consent problem on the
-user's side, not an API or scope problem.)
+This is almost always the real cause of a 1010 seen from the agent. It is NOT
+a Globus scope issue, NOT a consent issue, and NOT an account/allocation issue —
+do NOT send the user off to re-auth or contact ALCF support for a 1010. Just set
+the User-Agent. (A genuinely token-related failure looks different: HTTP 401
+"Globus token not active" or a 403 with a JSON body that is NOT "error code:
+1010".)
 
 ### IRI compute / filesystem lifecycle
 - Compute lifecycle: POST /compute/job/{resource_id} to submit; track with

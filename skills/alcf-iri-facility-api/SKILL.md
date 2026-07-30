@@ -107,14 +107,14 @@ in the task, not the submit response — a submit can return 200 while the task 
   compute scope or a second client id — an LLM seeing "filesystem" in the scope
   string has been observed hallucinating a fake compute client id and telling
   the user to edit the script. That is wrong.
-- **403 (error 1010) with a valid token is an AUTHZ/consent issue, not a scope
-  issue.** If `/account/projects` or `/compute/job` returns 403 while
-  `get_access_token` returns a fresh, non-expired token, it means the token needs
-  a full re-consent OR the identity lacks authorization/allocation. Fix: logout
-  at app.globus.org/logout, use incognito/cleared cache, and re-run
-  `alcf_facility_api_globus_token.py authenticate` (a FULL re-auth, not just
-  `get_access_token`). If it still 403s, it's an ALCF account/allocation problem
-  for ALCF support, not a token you can fix by changing scopes.
+- **403 "error code: 1010" = CLOUDFLARE bot-block, NOT auth.** api.alcf.anl.gov
+  is behind Cloudflare, which 403s requests with a default `Python-urllib/3.x`
+  User-Agent (body: `{"error":"error code: 1010\n"}`). The SAME token returns 200
+  via curl. Fix: send a normal `User-Agent` header on every urllib/requests call
+  (the bundled `iri_api_client.py` does). Do NOT diagnose a 1010 as a scope,
+  consent, identity, or allocation problem, and do NOT send the user to re-auth
+  or ALCF support for it. (A real token failure is 401 "Globus token not active"
+  or a 403 whose body is NOT "error code: 1010".) Verified 2026-07-30.
 - **`wget` is not on stock macOS** — the docs' `wget <url>` for the auth script fails on Macs.
   Use `curl -O <url>` (or `curl -sL <url> -o file.py`).
 - **A 200 on a filesystem submit is not success** — you MUST poll the task; it can still fail
