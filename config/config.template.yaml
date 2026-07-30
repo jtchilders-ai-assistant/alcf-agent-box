@@ -44,3 +44,13 @@ memory:
 display:
   # Web dashboard is the primary surface; the CLI/TUI still work if exec'd in.
   interface: cli
+
+# Dashboard auth. A containerized dashboard reachable via `docker run -p` must
+# bind 0.0.0.0, and Hermes (correctly) refuses a non-loopback bind without an
+# auth gate. The entrypoint fills these from ALCF_DASHBOARD_USER /
+# ALCF_DASHBOARD_PASSWORD (it hashes the password at start; the plaintext is
+# never written to disk). Placeholders left as-is if unset.
+dashboard:
+  basic_auth:
+    username: "${ALCF_DASHBOARD_USER}"
+    password_hash: "${ALCF_DASHBOARD_PASSWORD_HASH}"

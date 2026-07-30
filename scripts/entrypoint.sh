@@ -63,7 +63,21 @@ if [[ "${ALCF_ENABLE_IRI:-1}" == "1" ]]; then
   fi
 fi
 
-# --- 3. Render config (Python; no envsubst in the base image) ---------------
+# --- 3. Dashboard auth (required for a container 0.0.0.0 bind) ---------------
+# Hermes refuses a non-loopback dashboard bind without an auth gate. We hash a
+# password at start (plaintext never persisted). Password source, in order:
+#   ALCF_DASHBOARD_PASSWORD env  ->  else auto-generate one and print it once.
+ALCF_DASHBOARD_USER="${ALCF_DASHBOARD_USER:-alcf}"
+if [[ -z "${ALCF_DASHBOARD_PASSWORD:-}" ]]; then
+  ALCF_DASHBOARD_PASSWORD="$("$PY" -c 'import secrets; print(secrets.token_urlsafe(12))')"
+  log "No ALCF_DASHBOARD_PASSWORD set — generated one for this session:"
+  printf '\033[33m    dashboard login:  user=%s  password=%s\033[0m\n' "$ALCF_DASHBOARD_USER" "$ALCF_DASHBOARD_PASSWORD"
+  log "(set -e ALCF_DASHBOARD_PASSWORD=... to choose your own and keep it stable)"
+fi
+export ALCF_DASHBOARD_USER
+export ALCF_DASHBOARD_PASSWORD_HASH="$("$PY" -c "from plugins.dashboard_auth.basic import hash_password; print(hash_password('$ALCF_DASHBOARD_PASSWORD'))")"
+
+# --- 4. Render config (Python; no envsubst in the base image) ---------------
 render_config() {
   local token
   token="$("$PY" "$INFER_AUTH" get_access_token)"
@@ -71,6 +85,8 @@ render_config() {
   ALCF_BASE_URL="$ALCF_BASE_URL" \
   ALCF_MODEL="${ALCF_MODEL:-openai/gpt-oss-120b}" \
   ALCF_MAX_TOKENS="${ALCF_MAX_TOKENS:-2048}" \
+  ALCF_DASHBOARD_USER="$ALCF_DASHBOARD_USER" \
+  ALCF_DASHBOARD_PASSWORD_HASH="$ALCF_DASHBOARD_PASSWORD_HASH" \
   "$PY" - "$ALCF_DIR/config.template.yaml" "$CONFIG_OUT" <<'PYEOF'
 import os, sys, string
 src, dst = sys.argv[1], sys.argv[2]
@@ -83,7 +99,7 @@ PYEOF
 render_config
 log "Config rendered -> $CONFIG_OUT (cluster=$ALCF_CLUSTER model=${ALCF_MODEL:-openai/gpt-oss-120b})"
 
-# --- 4. Seed skills + memory (idempotent) -----------------------------------
+# --- 5. Seed skills + memory (idempotent) -----------------------------------
 mkdir -p "$HERMES_HOME/skills/research"
 cp -rn "$ALCF_DIR/skills/." "$HERMES_HOME/skills/research/" 2>/dev/null || true
 
@@ -94,7 +110,7 @@ if [[ -f "$ALCF_DIR/memory/MEMORY.md" && ! -f "$HERMES_HOME/MEMORY.md" ]]; then
   log "Seeded ALCF knowledge base into MEMORY.md"
 fi
 
-# --- 5. Token refresh loop (tokens last 48h; refresh every 6h) --------------
+# --- 6. Token refresh loop (tokens last 48h; refresh every 6h) --------------
 (
   while true; do
     sleep 21600
@@ -106,7 +122,7 @@ fi
   done
 ) &
 
-# --- 6. Launch the web dashboard --------------------------------------------
+# --- 7. Launch the web dashboard --------------------------------------------
 log "Starting web chat at http://localhost:${ALCF_DASHBOARD_PORT:-8787}"
 exec hermes dashboard \
   --host 0.0.0.0 \
