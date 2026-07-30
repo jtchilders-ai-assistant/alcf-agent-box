@@ -68,6 +68,14 @@ RUN chmod +x /opt/alcf/entrypoint.sh /opt/alcf/inference_auth_token.py \
              /opt/alcf/alcf_facility_api_globus_token.py \
     && chown -R hermes:hermes /opt/alcf
 
+# Bake the ALCF-agent-box git revision + build date so the container can print
+# an unambiguous version banner at startup ("am I running the right image?").
+# CI passes ALCF_GIT_SHA=${{ github.sha }}; a bare local build leaves it "dev".
+ARG ALCF_GIT_SHA=dev
+ARG ALCF_BUILD_DATE=unknown
+RUN printf '%s\n%s\n' "${ALCF_GIT_SHA}" "${ALCF_BUILD_DATE}" > /opt/alcf/.alcf_version \
+    && chown hermes:hermes /opt/alcf/.alcf_version
+
 # ALCF defaults (override at `docker run` with -e).
 ENV ALCF_MODEL=openai/gpt-oss-120b \
     ALCF_CLUSTER=sophia \

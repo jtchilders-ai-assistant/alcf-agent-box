@@ -24,6 +24,21 @@ CONFIG_OUT="$HERMES_HOME/config.yaml"
 log() { printf '\033[36m[alcf-agent]\033[0m %s\n' "$*"; }
 err() { printf '\033[31m[alcf-agent]\033[0m %s\n' "$*" >&2; }
 
+# --- 0. Version banner ------------------------------------------------------
+# Print the ALCF-agent-box git revision + build date baked at image build, plus
+# the underlying Hermes SHA, so you can confirm exactly which image is running.
+_alcf_sha="dev"; _alcf_date="unknown"
+if [[ -f "$ALCF_DIR/.alcf_version" ]]; then
+  _alcf_sha="$(sed -n 1p "$ALCF_DIR/.alcf_version")"
+  _alcf_date="$(sed -n 2p "$ALCF_DIR/.alcf_version")"
+fi
+_hermes_sha="$(cat /opt/hermes/.hermes_build_sha 2>/dev/null | cut -c1-12 || true)"
+printf '\033[1;36m╔══════════════════════════════════════════════════════════╗\033[0m\n'
+printf '\033[1;36m║\033[0m  ALCF Agent in a Box\n'
+printf '\033[1;36m║\033[0m  version : %s  (built %s)\n' "$_alcf_sha" "$_alcf_date"
+printf '\033[1;36m║\033[0m  hermes  : %s\n' "${_hermes_sha:-unknown}"
+printf '\033[1;36m╚══════════════════════════════════════════════════════════╝\033[0m\n'
+
 # --- 1. Resolve inference base_url ------------------------------------------
 case "${ALCF_CLUSTER:-sophia}" in
   sophia) ALCF_BASE_URL="https://inference-api.alcf.anl.gov/resource_server/sophia/vllm/v1" ;;
