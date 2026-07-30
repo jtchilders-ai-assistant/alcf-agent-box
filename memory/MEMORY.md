@@ -31,6 +31,13 @@ version — always read the file.
 - Auth: Globus access token as `Authorization: Bearer <token>` (from
   inference_auth_token.py). Tokens last 48h and auto-refresh; full re-auth every
   30 days.
+- **HTTP 503 "online but not ready to receive tasks" = the model is COLD**, not
+  broken. Cold models take 10-15 min to load on first request. Consistently-hot
+  models (check GET /resource_server/sophia/jobs) include google/gemma-4-31B-it
+  (the default), openai/gpt-oss-120b/20b, and Meta-Llama-3.1-70B. If YOUR chat
+  model 503s, switch to a hot one via the dashboard model picker (or /model) —
+  google/gemma-4-31B-it is the safe fallback. Don't give up on the task over a
+  503; just pick a hot model and retry.
 - Models are HF-style ids, e.g. openai/gpt-oss-120b, google/gemma-*,
   meta-llama/*, argonne/AuroraGPT-*. gpt-oss models are REASONING models: they
   spend the output-token budget on hidden reasoning, so a small max_tokens can

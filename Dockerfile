@@ -78,11 +78,12 @@ RUN printf '%s\n%s\n' "${ALCF_GIT_SHA}" "${ALCF_BUILD_DATE}" > /opt/alcf/.alcf_v
     && chown hermes:hermes /opt/alcf/.alcf_version
 
 # ALCF defaults (override at `docker run` with -e).
-# Default model: a NON-reasoning model (Llama-3.3-70B) for steadier, faster
-# tool-use. gpt-oss-120b is a reasoning model that (a) burns the token budget on
-# hidden reasoning and (b) empirically thrashed/garbled under agentic load; it's
-# still one click away in the dashboard model switcher for users who want it.
-ENV ALCF_MODEL=meta-llama/Llama-3.3-70B-Instruct \
+# Default model: google/gemma-4-31B-it — a NON-reasoning model that is
+# consistently kept "hot" on Sophia (multiple always-on instances), so it avoids
+# both (a) the HTTP 503 "online but not ready" cold-start you get from
+# less-popular models and (b) gpt-oss-120b's reasoning-token thrash/garble under
+# agentic load. All models remain switchable in the dashboard.
+ENV ALCF_MODEL=google/gemma-4-31B-it \
     ALCF_CLUSTER=sophia \
     ALCF_MAX_TOKENS=2048 \
     ALCF_DASHBOARD_PORT=8787 \
