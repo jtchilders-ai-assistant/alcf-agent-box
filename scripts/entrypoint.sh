@@ -103,11 +103,13 @@ log "Config rendered -> $CONFIG_OUT (cluster=$ALCF_CLUSTER model=${ALCF_MODEL:-o
 mkdir -p "$HERMES_HOME/skills/research"
 cp -rn "$ALCF_DIR/skills/." "$HERMES_HOME/skills/research/" 2>/dev/null || true
 
-# Built-in MEMORY.md is backend-agnostic and injected every turn. Seed only if
-# the user hasn't already got one (never clobber their edits).
-if [[ -f "$ALCF_DIR/memory/MEMORY.md" && ! -f "$HERMES_HOME/MEMORY.md" ]]; then
-  cp "$ALCF_DIR/memory/MEMORY.md" "$HERMES_HOME/MEMORY.md"
-  log "Seeded ALCF knowledge base into MEMORY.md"
+# Built-in memory is loaded from $HERMES_HOME/memories/MEMORY.md (note the
+# `memories/` subdir — seeding to $HERMES_HOME/MEMORY.md is silently ignored).
+# Seed only if the user hasn't already got one (never clobber their edits).
+if [[ -f "$ALCF_DIR/memory/MEMORY.md" && ! -f "$HERMES_HOME/memories/MEMORY.md" ]]; then
+  mkdir -p "$HERMES_HOME/memories"
+  cp "$ALCF_DIR/memory/MEMORY.md" "$HERMES_HOME/memories/MEMORY.md"
+  log "Seeded ALCF knowledge base into memories/MEMORY.md"
 fi
 
 # --- 6. Token refresh loop (tokens last 48h; refresh every 6h) --------------
