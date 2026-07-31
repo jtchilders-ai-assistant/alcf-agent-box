@@ -77,12 +77,29 @@ class IRI:
     def facility(self):
         return self._req("GET", "/facility", auth=False)[1]
 
+    def incidents(self):
+        """All incidents (no auth). Historical; each has type planned/unplanned,
+        start/end, resolution, and resource_uris. For 'is it up NOW' use
+        resources()[].current_status instead."""
+        return self._req("GET", "/status/incidents", auth=False)[1]
+
+    def events(self):
+        """All events (no auth). Each links to a resource + optional incident and
+        carries a human description (often maintenance windows w/ expected end)."""
+        return self._req("GET", "/status/events", auth=False)[1]
+
     # ---- account ----
     def projects(self):
         return self._req("GET", "/account/projects")[1]
 
     def allocations(self, project_id):
         return self._req("GET", f"/account/projects/{project_id}/project_allocations")[1]
+
+    def user_allocations(self, project_id, project_allocation_id):
+        return self._req(
+            "GET",
+            f"/account/projects/{project_id}/project_allocations/{project_allocation_id}/user_allocations",
+        )[1]
 
     # ---- compute ----
     def submit_job(self, resource_id, body):
@@ -91,6 +108,15 @@ class IRI:
     def job_status(self, resource_id, job_id, historical=True):
         return self._req("GET", f"/compute/status/{resource_id}/{job_id}",
                          params={"historical": str(historical).lower()})[1]
+
+    def job_statuses(self, resource_id, historical=False, limit=100, offset=0, include_spec=False):
+        """List the caller's jobs on a resource (POST /compute/status/{resource}).
+        historical=True includes finished jobs. Returns the raw response."""
+        return self._req("POST", f"/compute/status/{resource_id}", params={
+            "historical": str(historical).lower(),
+            "limit": limit, "offset": offset,
+            "include_spec": str(include_spec).lower(),
+        })[1]
 
     def cancel_job(self, resource_id, job_id):
         return self._req("DELETE", f"/compute/cancel/{resource_id}/{job_id}")[0]  # 204 = accepted

@@ -79,8 +79,10 @@ COPY config/config.template.yaml /opt/alcf/config.template.yaml
 COPY config/SOUL.md /opt/alcf/SOUL.md
 COPY scripts/entrypoint.sh /opt/alcf/entrypoint.sh
 COPY scripts/iri_hello_world.py /opt/alcf/iri_hello_world.py
+COPY scripts/alcf_facility.py /opt/alcf/alcf_facility.py
 RUN chmod +x /opt/alcf/entrypoint.sh /opt/alcf/inference_auth_token.py \
              /opt/alcf/alcf_facility_api_globus_token.py /opt/alcf/iri_hello_world.py \
+             /opt/alcf/alcf_facility.py \
     && chown -R hermes:hermes /opt/alcf
 
 # Bake the ALCF-agent-box git revision + build date so the container can print

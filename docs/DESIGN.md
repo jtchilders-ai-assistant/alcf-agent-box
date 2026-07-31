@@ -109,7 +109,9 @@ scripts/entrypoint.sh              first-run auth, config render, refresh loop, 
 scripts/fetch_docs.py              pulls ALCF user-guides markdown into docs/
 scripts/inference_auth_token.py    vendored Globus helper (inference)
 scripts/alcf_facility_api_globus_token.py  vendored Globus helper (IRI)
-skills/                            alcf-inference-service, alcf-iri-facility-api, alcf-pbs...
+scripts/iri_hello_world.py         one-shot IRI job submitter (write; consumes allocation)
+scripts/alcf_facility.py           read-only helper: system status, my jobs, job output, allocations
+skills/                            alcf-inference-service, alcf-iri-facility-api, alcf-pbs..., alcf-facility-status-and-jobs
 memory/MEMORY.md                   curated, sanitized ALCF knowledge (seeded to built-in memory)
 docs/                              ALCF docs snapshot (nightly CI)
 .github/workflows/build.yml        build + push image to GHCR
