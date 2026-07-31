@@ -103,7 +103,7 @@ render_config() {
   token="$("$PY" "$INFER_AUTH" get_access_token)"
   ALCF_ACCESS_TOKEN="$token" \
   ALCF_BASE_URL="$ALCF_BASE_URL" \
-  ALCF_MODEL="${ALCF_MODEL:-openai/gpt-oss-120b}" \
+  ALCF_MODEL="${ALCF_MODEL:-google/gemma-4-31B-it}" \
   ALCF_MAX_TOKENS="${ALCF_MAX_TOKENS:-2048}" \
   ALCF_DASHBOARD_USER="$ALCF_DASHBOARD_USER" \
   ALCF_DASHBOARD_PASSWORD_HASH="$ALCF_DASHBOARD_PASSWORD_HASH" \
@@ -117,7 +117,7 @@ open(dst, "w", encoding="utf-8").write(out)
 PYEOF
 }
 render_config
-log "Config rendered -> $CONFIG_OUT (cluster=$ALCF_CLUSTER model=${ALCF_MODEL:-openai/gpt-oss-120b})"
+log "Config rendered -> $CONFIG_OUT (cluster=$ALCF_CLUSTER model=${ALCF_MODEL:-google/gemma-4-31B-it})"
 
 # --- 5. Seed / refresh skills + memory ---------------------------------------
 # ALCF skills and the knowledge base are IMAGE-MANAGED: we refresh them from the

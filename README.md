@@ -8,7 +8,7 @@ web chat that can:
   curated knowledge base (baked into the image).
 - **Run inference on the [ALCF Inference Service]** (Sophia / Metis) — no
   external LLM provider, no API key to manage. The agent's own brain *is* an
-  ALCF-hosted open model (e.g. `gpt-oss-120b`).
+  ALCF-hosted open model (default `google/gemma-4-31B-it`).
 - **Submit and manage jobs** on ALCF systems (Polaris, Crux, Aurora) through the
   [IRI Facility API], plus filesystem operations on Home/Eagle.
 
@@ -141,7 +141,7 @@ running config at container start. Environment variables you can override at
 
 | Env var | Default | Meaning |
 |---|---|---|
-| `ALCF_MODEL` | `openai/gpt-oss-120b` | Model id on the inference service |
+| `ALCF_MODEL` | `google/gemma-4-31B-it` | Model id on the inference service |
 | `ALCF_CLUSTER` | `sophia` | `sophia` (vLLM) or `metis` (SambaNova) |
 | `ALCF_MAX_TOKENS` | `2048` | Output cap (reasoning models need headroom) |
 | `ALCF_DASHBOARD_PORT` | `8787` | Web chat port inside the container |
@@ -182,10 +182,11 @@ standard OpenAI `/v1/models` path, so the image ships a **curated switchable
 list** (in `config/config.template.yaml` under `custom_providers`). In the web
 chat, click the **MODEL** selector → **alcf-inference** and pick one:
 
-- `openai/gpt-oss-120b` (default), `openai/gpt-oss-20b` — reasoning models
+- `google/gemma-4-31B-it` (default) — non-reasoning, kept consistently hot
+- `openai/gpt-oss-120b`, `openai/gpt-oss-20b` — reasoning models
 - `meta-llama/Llama-3.3-70B-Instruct`, `Meta-Llama-3.1-8B-Instruct`,
   `Llama-4-Maverick-…`, `Llama-4-Scout-…`
-- `google/gemma-4-31B-it`, `mistralai/Mixtral-8x22B-…`,
+- `mistralai/Mixtral-8x22B-…`,
   `mistralai/Mistral-Large-…`, `nvidia/nemotron-3-super-120b`
 - `argonne/AuroraGPT-IT-v4-0125` (Argonne's own model)
 
@@ -217,5 +218,6 @@ docker build -t alcf-agent:dev .
 **Working, verified end-to-end in a real container.** A `docker run` does the
 Globus login, persists the token to the volume (subsequent starts skip re-auth),
 serves an auth-gated web chat, and the in-container agent drives ALCF inference
-(`gpt-oss-120b`) *with working tool calls*. Remaining polish is tracked in
+(default `google/gemma-4-31B-it`) *with working tool calls*. Remaining polish is
+tracked in
 [docs/DESIGN.md](docs/DESIGN.md) → "Open items".

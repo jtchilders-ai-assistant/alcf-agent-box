@@ -14,7 +14,7 @@ model:
   provider: custom
   base_url: "${ALCF_BASE_URL}"        # e.g. https://inference-api.alcf.anl.gov/resource_server/sophia/vllm/v1
   api_key: "${ALCF_ACCESS_TOKEN}"     # Globus access token, injected + refreshed by entrypoint
-  model: "${ALCF_MODEL}"              # e.g. openai/gpt-oss-120b
+  model: "${ALCF_MODEL}"              # e.g. google/gemma-4-31B-it
   default: "${ALCF_MODEL}"
 
   # Reasoning models (gpt-oss-*) spend the output budget on a hidden reasoning
