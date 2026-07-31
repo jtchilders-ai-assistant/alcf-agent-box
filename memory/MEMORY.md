@@ -31,6 +31,38 @@ version — always read the file.
 - Auth: Globus access token as `Authorization: Bearer <token>` (from
   inference_auth_token.py). Tokens last 48h and auto-refresh; full re-auth every
   30 days.
+
+### Inference token lifetime & expiry (how to recognize + fix)
+Your LLM brain authenticates with a Globus **access token** that is the config
+`api_key`. Lifecycle:
+- **48-hour access token, auto-refreshed.** The container re-renders the config
+  with a fresh token every 6h using a stored refresh token, so normally you
+  never notice.
+- **30-day hard re-auth.** After ~30 days the refresh token itself expires and
+  the container CANNOT refresh unattended — it needs an interactive Globus
+  browser login again.
+
+**When the login has expired, your own LLM calls fail** (usually HTTP 401 from
+inference-api.alcf.anl.gov, or replies that error out / come back empty). This
+is NOT a model-cold 503 and NOT something you can fix by switching models.
+
+To recognize + handle it:
+1. On refresh failure the entrypoint writes a status file. If chat is
+   misbehaving, READ `$HERMES_HOME/.inference_token_status` (a.k.a.
+   `/opt/data/.inference_token_status`). Empty = healthy. First line `EXPIRED`
+   = the inference login expired; the second line is the exact fix to relay.
+2. Tell the user to run this ONCE on their host, then chat works again:
+
+       docker exec -it <container> \
+         /opt/hermes/.venv/bin/python /opt/alcf/inference_auth_token.py authenticate
+
+   (or restart the container, which prompts for the login at startup). You (the
+   agent) CANNOT complete this browser login yourself — hand the command to the
+   user, same as the IRI login flow below.
+
+Note this is the INFERENCE login. The IRI login is separate (see below); an
+expired inference token does not affect an already-valid IRI token or vice
+versa.
 - **HTTP 503 "online but not ready to receive tasks" = the model is COLD**, not
   broken. Cold models take 10-15 min to load on first request. Consistently-hot
   models (check GET /resource_server/sophia/jobs) include google/gemma-4-31B-it

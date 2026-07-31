@@ -155,13 +155,35 @@ managed_seed "$ALCF_DIR/memory/MEMORY.md" "$HERMES_HOME/memories/MEMORY.md" "ALC
 cp -r "$ALCF_DIR/skills/." "$HERMES_HOME/skills/research/" 2>/dev/null || true
 
 # --- 6. Token refresh loop (tokens last 48h; refresh every 6h) --------------
+# The inference token IS the api_key, and it rotates. We re-render the config
+# with a fresh token every 6h. If a refresh FAILS, the token has almost
+# certainly hit the 30-day hard re-auth limit — from then on every LLM call
+# will fail upstream (typically HTTP 401). A chat-only user never sees the
+# container log, so we (a) print a loud, actionable banner to the log AND (b)
+# drop a status file on the volume that the agent reads and surfaces IN CHAT
+# (see memory/MEMORY.md → "Inference token expiry"). On success we clear it.
+TOKEN_STATUS="$HERMES_HOME/.inference_token_status"
+: > "$TOKEN_STATUS" 2>/dev/null || true   # start clean (empty = healthy)
+reauth_cmd="docker exec -it <container> \\
+  /opt/hermes/.venv/bin/python /opt/alcf/inference_auth_token.py authenticate"
 (
   while true; do
     sleep 21600
     if render_config 2>/dev/null; then
       log "Refreshed inference access token."
+      : > "$TOKEN_STATUS" 2>/dev/null || true   # healthy again
     else
-      err "Token refresh failed — a full re-auth may be needed (30-day policy)."
+      err "╔═══════════════════════════════════════════════════════════════╗"
+      err "║  INFERENCE TOKEN REFRESH FAILED                               ║"
+      err "║  Your ALCF inference login has expired (30-day re-auth limit). ║"
+      err "║  The agent's LLM calls will fail until you re-authenticate.    ║"
+      err "║  Run this on your host, then the agent works again:           ║"
+      err "╚═══════════════════════════════════════════════════════════════╝"
+      err "    $reauth_cmd"
+      # Machine-readable note the agent reads to explain the failure in chat.
+      printf 'EXPIRED\n%s\n' \
+        "Inference Globus login expired (30-day re-auth). Re-authenticate on the host: $reauth_cmd" \
+        > "$TOKEN_STATUS" 2>/dev/null || true
     fi
   done
 ) &
