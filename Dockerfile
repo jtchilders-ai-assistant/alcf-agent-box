@@ -76,6 +76,7 @@ COPY skills/  /opt/alcf/skills/
 COPY memory/  /opt/alcf/memory/
 COPY docs/    /opt/alcf/docs/
 COPY config/config.template.yaml /opt/alcf/config.template.yaml
+COPY config/SOUL.md /opt/alcf/SOUL.md
 COPY scripts/entrypoint.sh /opt/alcf/entrypoint.sh
 COPY scripts/iri_hello_world.py /opt/alcf/iri_hello_world.py
 RUN chmod +x /opt/alcf/entrypoint.sh /opt/alcf/inference_auth_token.py \

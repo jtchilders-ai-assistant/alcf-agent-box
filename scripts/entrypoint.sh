@@ -148,6 +148,7 @@ managed_seed() {  # $1=source file, $2=dest file, $3=label
 }
 
 managed_seed "$ALCF_DIR/memory/MEMORY.md" "$HERMES_HOME/memories/MEMORY.md" "ALCF knowledge base (memories/MEMORY.md)"
+managed_seed "$ALCF_DIR/SOUL.md" "$HERMES_HOME/SOUL.md" "ALCF Agent identity (SOUL.md)"
 # Skills: refresh each SKILL.md tree wholesale when unmodified (skills are
 # reference material, not typically user-edited). Simple approach: mirror the
 # baked skills dir, overwriting — skills live under skills/research/ which is

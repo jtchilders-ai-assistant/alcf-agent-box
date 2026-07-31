@@ -104,6 +104,7 @@ All proven with real execution, not description:
 ```
 Dockerfile                         patched-Hermes install + content, layered
 config/config.template.yaml        single ALCF inference target + both fixes
+config/SOUL.md                     agent identity + "what can I do" greeting (seeded to $HERMES_HOME/SOUL.md)
 scripts/entrypoint.sh              first-run auth, config render, refresh loop, launch
 scripts/fetch_docs.py              pulls ALCF user-guides markdown into docs/
 scripts/inference_auth_token.py    vendored Globus helper (inference)
