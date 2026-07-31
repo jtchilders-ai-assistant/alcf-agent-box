@@ -57,13 +57,17 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          # Do not reuse layer cache across commits: the image bakes per-commit
-          # content (skills, MEMORY.md, config, the version stamp, helper
-          # scripts) and a stale gha cache has published images two commits
-          # behind (COPY/ENV/ARG layers served from cache). A ~2-min clean build
-          # is worth guaranteed-fresh images. Re-enable a SHA-scoped cache later
-          # if build time becomes a problem.
-          no-cache: true
+          # SHA-scoped GHA cache. The image bakes per-commit content (skills,
+          # MEMORY.md, config, the version stamp, helper scripts), so a cache
+          # shared ACROSS commits once published images two commits behind
+          # (COPY/ENV/ARG layers served from a stale cache). Scoping the cache
+          # to ${{ github.sha }} makes each commit its own namespace: the first
+          # build for a SHA is cold (rebuilds all content — correct), while
+          # re-runs of the SAME commit (e.g. a retried job) reuse it, and the
+          # heavy base layers (uv install, Caddy copy) are still cached within
+          # the run's multi-arch fan-out. No cross-commit staleness possible.
+          cache-from: type=gha,scope=${{ github.sha }}
+          cache-to: type=gha,scope=${{ github.sha }},mode=max
           provenance: false
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
