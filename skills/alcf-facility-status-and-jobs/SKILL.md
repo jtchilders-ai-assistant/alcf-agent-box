@@ -34,7 +34,10 @@ its output?", "How many node-hours do I have left?".
         --storage eagle --path /eagle/<project>/run/out.log --offset 500000 --size 4000
 
     # 4. Projects + allocations (node-hours allocated vs used) (auth).
-    /opt/hermes/.venv/bin/python /opt/alcf/alcf_facility.py allocations
+    #    You may be in MANY projects; --project filters (substring on name),
+    #    otherwise only the first few are shown (allocations = 1 API call each).
+    /opt/hermes/.venv/bin/python /opt/alcf/alcf_facility.py allocations --project <name>
+    /opt/hermes/.venv/bin/python /opt/alcf/alcf_facility.py allocations   # first few projects
 
 Every subcommand accepts `--json` to get the raw API payload if the summarized
 view is missing a field you need.
@@ -55,6 +58,17 @@ view is missing a field you need.
 - **Filesystem reads are Home/Eagle only** and async under the hood; the helper
   polls the task for you. `head`/`view` are implemented; `tail`/`stat`/`checksum`
   and `upload`/`download` are 501 stubs at ALCF — do not rely on them.
+- **Per-identity path allowlist.** Reads are restricted to the token owner's own
+  paths: the API rejects a path outside `/home/<the-token-user>`, `/eagle`, or
+  `/lus/eagle` with an "Input validation error: Path must start with one of…"
+  message that names the allowed roots. So use the USER's own username in the
+  path (get it from `account/projects` → `user_ids`, or the allowlist error
+  itself), not a guessed one.
+- **Verified response shapes (2026-07-31, live token):** `jobs` → each item is
+  `{"id": "<pbsid>.polaris-…", "status": {"state","exit_code"}}`; `allocations`
+  → `{"entries":[{"allocation","usage","unit"}],"capability_uri":".../<resource>"}`;
+  `output` (head/view) → text at `result.output.content`; `ls` → entries at
+  `result.output` (list). The helper already parses these; `--json` shows raw.
 - **Read-only by design.** This skill never submits, cancels, or deletes. For job
   submission use `iri_hello_world.py` / the `alcf-iri-facility-api` skill; those
   are writes and consume the user's allocation — confirm before running them.

@@ -134,13 +134,18 @@ def cmd_jobs(args) -> int:
         if isinstance(resp, dict) and resp.get("error"):
             print(f"  (API said: {str(resp['error'])[:200]})", file=sys.stderr)
         return 0
+    # Real shape (verified 2026-07-31): each job = {"id": "<pbsid>.polaris-...",
+    # "status": {"state": "...", "exit_code": N}}. Fall back gracefully if the
+    # API adds richer fields later.
     print(f"Your jobs on {args.cluster}:")
     for j in jobs:
-        jid = j.get("job_id") or j.get("id") or "?"
-        state = j.get("state") or j.get("job_state") or j.get("status") or "?"
-        name = j.get("name") or ""
-        q = j.get("queue") or j.get("queue_name") or ""
-        print(f"  {jid:24s} {state:10s} {q:10s} {name}")
+        jid = j.get("id") or j.get("job_id") or "?"
+        st = j.get("status") if isinstance(j.get("status"), dict) else {}
+        state = st.get("state") or j.get("state") or j.get("job_state") or "?"
+        exit_code = st.get("exit_code")
+        exit_s = "" if exit_code in (None, "") else f"exit={exit_code}"
+        short = jid.split(".")[0]  # bare PBS id for readability
+        print(f"  {short:12s} {state:10s} {exit_s:8s} {jid}")
     return 0
 
 
@@ -160,11 +165,24 @@ def cmd_output(args) -> int:
         print(json.dumps(res, indent=2))
         return 0
     if isinstance(res, dict) and res.get("status") in ("failed", "error"):
-        print(f"Read failed: {json.dumps(res)[:300]}", file=sys.stderr)
+        print(f"Read failed: {json.dumps(res)[:400]}", file=sys.stderr)
         return 1
-    # The task result payload shape varies; print the most useful field.
+    # Real shape (verified 2026-07-31): the task result nests the text at
+    #   result.output.content   (content_type 'lines' for head, 'bytes' for view)
+    # with start/end position metadata. ls uses result.output = [entries].
     payload = res.get("result") if isinstance(res, dict) else res
-    print(payload if isinstance(payload, str) else json.dumps(payload, indent=2))
+    content = None
+    if isinstance(payload, dict):
+        out = payload.get("output")
+        if isinstance(out, dict):
+            content = out.get("content")
+        else:
+            content = out
+    if content is not None:
+        print(content if isinstance(content, str) else json.dumps(content, indent=2))
+    else:
+        # Unknown shape — show the raw task result so nothing is silently lost.
+        print(json.dumps(payload if payload is not None else res, indent=2))
     return 0
 
 
@@ -180,6 +198,22 @@ def cmd_allocations(args) -> int:
         if isinstance(projects, dict) and projects.get("error"):
             print(f"  (API said: {str(projects['error'])[:200]})", file=sys.stderr)
         return 0
+    # Filter to a named project if asked (allocations() is one API call per
+    # project, so listing ALL of them is slow when you're in many projects).
+    if args.project:
+        want = args.project.lower()
+        plist = [p for p in plist if want in (p.get("name", "").lower())]
+        if not plist:
+            print(f"No project matching '{args.project}'. "
+                  f"Run without --project to see your project names.")
+            return 0
+    elif len(plist) > args.max_projects:
+        names = ", ".join(p.get("name", "?") for p in plist)
+        print(f"You're in {len(plist)} projects: {names}\n")
+        print(f"Showing allocations for the first {args.max_projects} "
+              f"(use --project <name> for a specific one, or --max-projects N).\n")
+        plist = plist[: args.max_projects]
+
     print("Your ALCF projects & allocations:")
     for p in plist:
         pid = p.get("id")
@@ -190,12 +224,30 @@ def cmd_allocations(args) -> int:
         if not alist:
             print("    (no allocations)")
             continue
+        # Real shape (verified 2026-07-31): each allocation =
+        # {"id","entries":[{"allocation","usage","unit"}],"capability_uri":".../<resource>"}.
         for a in alist:
-            total = a.get("allocated") or a.get("units_allocated") or a.get("amount")
-            used = a.get("used") or a.get("units_used")
-            res = a.get("resource_name") or a.get("resource") or ""
-            end = a.get("end") or a.get("end_date") or ""
-            print(f"    {res:12s} allocated={total} used={used} ends={str(end)[:10]}")
+            cap = (a.get("capability_uri") or "").rstrip("/").split("/")[-1] or a.get("id", "?")
+            entries = a.get("entries") or []
+            if not entries:
+                print(f"    {cap:12s} (no entries)")
+                continue
+            for e in entries:
+                total = e.get("allocation")
+                used = e.get("usage")
+                unit = e.get("unit", "")
+                remaining = None
+                try:
+                    remaining = round(float(total) - float(used), 1)
+                except (TypeError, ValueError):
+                    pass
+                rem_s = f" remaining={remaining}" if remaining is not None else ""
+                # round usage for readability
+                try:
+                    used_disp = round(float(used), 1)
+                except (TypeError, ValueError):
+                    used_disp = used
+                print(f"    {cap:12s} allocated={total} used={used_disp}{rem_s} {unit}")
     if args.json:
         print("\n" + json.dumps(plist, indent=2))
     return 0
@@ -227,6 +279,9 @@ def main() -> int:
     o.set_defaults(func=cmd_output)
 
     a = sub.add_parser("allocations", help="your projects + node-hours (auth)")
+    a.add_argument("--project", help="only this project (substring match on name)")
+    a.add_argument("--max-projects", type=int, default=5, dest="max_projects",
+                   help="cap projects shown when not filtering (default 5)")
     a.add_argument("--json", action="store_true")
     a.set_defaults(func=cmd_allocations)
 
