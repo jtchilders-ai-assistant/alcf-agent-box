@@ -70,8 +70,9 @@ so a URL from a previously-killed process is useless (its code fails with
 - **Submit:** `POST /compute/job/{resource_id}` with a JSON body (executable, arguments,
   name, stdout_path, stderr_path, resources.node_count, attributes.{duration, queue_name,
   account, custom_attributes.filesystems}). Returns **HTTP 200** with the PBS job id
-  (`NNNNNNN.polaris-pbs-01...`) and initial state. `account` = the PROJECT NAME (e.g.
-  `Vendor_Support`); `queue_name` = a real PBS queue (e.g. `debug`); stdout/stderr paths must
+  (`NNNNNNN.polaris-pbs-01...`) and initial state. `account` = the PROJECT NAME (your
+  ALCF project/allocation — look it up via `GET /account/projects`); `queue_name` = a real
+  PBS queue (e.g. `debug`); stdout/stderr paths must
   exist first (mkdir them). Job body maps to a `qsub` script minus `#PBS` directives.
 - **Get one job (reliable):** `GET /compute/status/{resource_id}/{job_id}?historical=true`. Use
   this to track a specific job. States seen: queued → active → completed. A cancelled job

@@ -52,12 +52,12 @@ Token cache: `~/.globus/app/8b84fc2d-49e9-49ea-b54d-b3a29a70cf31/alcf_facility_a
 | 5.3 | .../project_allocations | GET | 200 |
 | 5.4 | .../project_allocations/{id} | GET | 200 |
 
-Compute proof: submitted 10s sleep to Polaris (queue `debug`, account `Vendor_Support`) →
+Compute proof: submitted 10s sleep to Polaris (queue `debug`, a real project account) →
 job `7260513.polaris-pbs-01...` → queued→active → DELETE cancel (204) → terminal `completed`
 → removed `.OU`/`.ER` output files. Job left a 10-byte stdout (`Start\n`) before cancel landed.
 
-Account note: `Vendor_Support` had a Polaris allocation (1000 node_hours, ~15.5 used). Empty
-allocation list (`[]`) is a valid 200 response (e.g. PolarisAT had none).
+Account note: look up your project + remaining allocation via `GET /account/projects` and
+`.../project_allocations`. An empty allocation list (`[]`) is a valid 200 response.
 
 ## Doc discrepancies found (report these upstream)
 

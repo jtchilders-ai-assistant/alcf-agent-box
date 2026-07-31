@@ -21,19 +21,25 @@ is Hermes + ALCF-specific content + a thin runtime wrapper, not a new framework.
 ```
         ┌─────────────────────────── container ───────────────────────────┐
         │                                                                  │
- laptop │  browser ──http://localhost:8787──▶  hermes dashboard (web chat) │
- ───────┼─────────────────────────────────────────┬────────────────────── │
-        │                                          │ agent core (tools)    │
-        │   ~/.globus (vol) ── Globus tokens ──────┤                       │
-        │   ~/.hermes (vol) ── memory + config ────┤                       │
-        └──────────────────────────────────────────┼──────────────────────┘
-                                                    │
-                    ┌───────────────────────────────┼───────────────────────────┐
-                    ▼                                ▼                            ▼
+ laptop │  browser ─https://localhost:8787─▶ Caddy (TLS) ─▶ hermes         │
+ ───────┼──────────────────────────────────────┬── dashboard (web chat)── │
+        │  (self-signed cert; HTTPS = clipboard)│    agent core (tools)    │
+        │   /opt/data (named volume) ───────────┤                          │
+        │     ├─ .globus  → Globus tokens       │                          │
+        │     └─ memory + config + sessions     │                          │
+        └───────────────────────────────────────┼─────────────────────────┘
+                                                 │
+                    ┌────────────────────────────┼───────────────────────────┐
+                    ▼                             ▼                            ▼
         ALCF Inference Service          IRI Facility API                 (skills + docs
         inference-api.alcf.anl.gov      api.alcf.anl.gov                  baked into image)
-        (LLM brain: gpt-oss-120b)       (job submit / fs ops)
+        (LLM brain: gemma-4-31B-it)     (job submit / fs ops)
 ```
+
+A single named volume (`alcf-agent-home` → `/opt/data`) holds Globus tokens
+*and* Hermes memory/config/sessions; Caddy terminates TLS on the public port
+(so the chat's clipboard works) and reverse-proxies to the dashboard on
+loopback inside the container.
 
 ## The LLM source: ALCF Inference Service (not Argo)
 
@@ -115,18 +121,31 @@ The image is shared, so it must carry only generic ALCF knowledge:
 - [x] No personal ANL username / API keys in skills or config.
 - [x] Memory seed is a curated public-facts file, NOT an export of a personal
       Mnemosyne bank.
-- [ ] Review `Vendor_Support` project-name references in the IRI skill (generic
-      example; harmless but confirm before publish).
-- [ ] Confirm the Hermes fork branch has no unrelated personal patches when the
-      image pins it (or pin a dedicated clean tag).
+- [x] Review `Vendor_Support` project-name references in the IRI skill —
+      genericized to `<your project>` / "look it up via GET /account/projects"
+      (removed the specific project name + allocation node-hour figures).
+- [x] The pinned Hermes fork branch carries only the `strip_tool_message_name`
+      patch (4 unit tests); no unrelated personal patches. Pin a dedicated clean
+      tag if the branch later accumulates other commits.
 
 ## Open items
 
-1. `docker build` validation + a first real container run-through of the
-   two-login onboarding.
-2. Decide image base model default (gpt-oss-120b vs a non-reasoning model like a
-   Llama/Gemma to avoid the max_tokens subtlety for naive users).
-3. `git init` + create the GitHub repo under `jtchilders-ai-assistant` (or the
-   `argonne-lcf` org if this becomes official).
-4. Decide whether to also serve the Hermes CLI/TUI (currently dashboard-only).
-5. Upstream the `strip_tool_message_name` fix to NousResearch as a PR.
+Everything in the original build plan is done and verified (image built and
+run end-to-end, default model chosen — see below — GitHub repo + CI live). The
+remaining items are genuinely optional follow-ups:
+
+1. Serve the Hermes CLI/TUI in addition to the dashboard (currently
+   dashboard-only; the CLI still works if you `docker exec` in).
+2. Upstream the `strip_tool_message_name` fix to NousResearch as a PR. The fork
+   branch `feat/strip-tool-message-name` is pushed; once merged, the
+   `patches/0001-*.patch` layer becomes a no-op and can be deleted.
+
+### Resolved (kept for history)
+
+- ✅ `docker build` validation + a real first-run of the two-login onboarding.
+- ✅ Default model decided: `google/gemma-4-31B-it` — a non-reasoning model kept
+  consistently *hot* on Sophia, so it avoids both the cold-start HTTP 503 and
+  gpt-oss's reasoning-token thrash under agentic load. All models stay
+  switchable in the dashboard.
+- ✅ Repo created under `jtchilders-ai-assistant` with GHCR publish + nightly
+  docs-refresh CI. (Move to `argonne-lcf` if this becomes official.)
