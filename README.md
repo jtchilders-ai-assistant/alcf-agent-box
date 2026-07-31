@@ -15,6 +15,11 @@ web chat that can:
 It is built on [Hermes Agent] (Nous Research) — an open-source, provider-agnostic
 agent framework with persistent memory, skills, and a built-in web dashboard.
 
+> ⚠️ **Independent tool — not an official ALCF/Argonne/DOE product**, and it runs
+> an **autonomous AI agent** that can be wrong and that takes real actions with
+> your credentials (jobs, node-hours, files). **You are responsible for what it
+> does.** Please read [DISCLAIMER.md](DISCLAIMER.md) before using it.
+
 [ALCF Inference Service]: https://docs.alcf.anl.gov/services/inference-endpoints/
 [IRI Facility API]: https://docs.alcf.anl.gov/services/iri-api/
 [Hermes Agent]: https://github.com/NousResearch/hermes-agent
@@ -221,3 +226,17 @@ serves an auth-gated web chat, and the in-container agent drives ALCF inference
 (default `google/gemma-4-31B-it`) *with working tool calls*. Remaining polish is
 tracked in
 [docs/DESIGN.md](docs/DESIGN.md) → "Open items".
+
+---
+
+## License & disclaimer
+
+Licensed under the **Apache License, Version 2.0** — see [LICENSE](LICENSE) and
+[NOTICE](NOTICE). This includes an explicit disclaimer of warranty and
+limitation of liability.
+
+This is an **independent community project**, not an official ALCF/Argonne/DOE
+product, and it runs an **autonomous AI agent that can be wrong and that acts
+with your credentials**. Before using it, read **[DISCLAIMER.md](DISCLAIMER.md)** —
+it covers the non-affiliation, the agent's autonomy and fallibility, and your
+responsibility for the actions it takes on your behalf.

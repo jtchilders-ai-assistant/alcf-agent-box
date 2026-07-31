@@ -1,0 +1,16 @@
+ALCF Agent in a Box
+Copyright 2026 J. Taylor Childers and ALCF Agent in a Box contributors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This is an independent, community project. It is NOT an official product of
+Argonne National Laboratory (ANL), the Argonne Leadership Computing Facility
+(ALCF), or the U.S. Department of Energy (DOE), and it is not affiliated with,
+endorsed by, or supported by any of them. See DISCLAIMER.md.
+
+This product is built on Hermes Agent (https://github.com/NousResearch/hermes-agent),
+Copyright Nous Research, used under its own license.
+
+"ALCF", "Argonne", "Aurora", "Polaris", "Sophia", "Crux", and related names are
+used here only to describe interoperability with Argonne Leadership Computing
+Facility services. Their use does not imply any affiliation or endorsement.
