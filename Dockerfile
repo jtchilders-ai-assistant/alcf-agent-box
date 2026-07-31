@@ -15,8 +15,12 @@
 #      Globus auth, renders the config with a fresh token, and launches the
 #      dashboard.
 #
-# Pin the base by tag for reproducibility; bump deliberately.
-ARG HERMES_BASE=nousresearch/hermes-agent:latest
+# Pin the base by an explicit version tag for reproducibility (not :latest,
+# which drifts and could break the strip_tool_message_name patch apply or move
+# the venv/plugin paths the entrypoint relies on). Bump deliberately after
+# re-verifying the patch applies + tool calls still work. v2026.7.30 is the
+# release the full feature set was verified against.
+ARG HERMES_BASE=nousresearch/hermes-agent:v2026.7.30
 FROM ${HERMES_BASE}
 
 # The base image sets USER/ENV/ENTRYPOINT for the stock Hermes runtime. We need
@@ -36,12 +40,21 @@ COPY config/Caddyfile /opt/alcf/Caddyfile
 # 1. Apply the strip_tool_message_name patch to the installed Hermes source.
 #    git is present in the base image; `patch` is not. Applied against
 #    /opt/hermes which is a git-tracked install tree.
+#
+#    Idempotent + upstream-safe: if the base image already carries the flag
+#    (i.e. the fix was merged upstream and we bumped HERMES_BASE), we SKIP the
+#    patch instead of failing the build on an already-applied hunk. Once the
+#    flag is guaranteed upstream, this whole layer can be deleted.
 # ---------------------------------------------------------------------------
 COPY patches/0001-strip-tool-message-name.patch /tmp/alcf/0001.patch
 RUN cd /opt/hermes \
-    && git apply --unsafe-paths --directory=/opt/hermes /tmp/alcf/0001.patch \
-    && grep -q strip_tool_message_name agent/transports/chat_completions.py \
-    && echo "ALCF patch applied: strip_tool_message_name present" \
+    && if grep -q strip_tool_message_name agent/transports/chat_completions.py; then \
+         echo "ALCF patch skipped: strip_tool_message_name already present (upstream?)"; \
+       else \
+         git apply --unsafe-paths --directory=/opt/hermes /tmp/alcf/0001.patch \
+         && grep -q strip_tool_message_name agent/transports/chat_completions.py \
+         && echo "ALCF patch applied: strip_tool_message_name present"; \
+       fi \
     && rm -rf /tmp/alcf
 
 # ---------------------------------------------------------------------------
@@ -94,6 +107,16 @@ ENV ALCF_MODEL=google/gemma-4-31B-it \
     XDG_CONFIG_HOME=/opt/data/.config
 
 EXPOSE 8787
+
+# Health: the public port is HTTPS (Caddy, self-signed) proxying to the
+# dashboard. `curl -k` tolerates the self-signed cert; we accept ANY HTTP
+# response (including the 401 auth challenge) as "server up" — we only care
+# that Caddy + the dashboard behind it are answering. start-period covers
+# first-run Globus auth + dashboard warmup.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
+  CMD curl -ks -o /dev/null -w '%{http_code}' \
+        "https://127.0.0.1:${ALCF_DASHBOARD_PORT}/" 2>/dev/null \
+      | grep -qE '^[1-5][0-9]{2}$' || exit 1
 
 # Our entrypoint does the ALCF first-run flow, then hands off to the stock
 # `hermes dashboard`. We run it as the non-root hermes user (the base image's
