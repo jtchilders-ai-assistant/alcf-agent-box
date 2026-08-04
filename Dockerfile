@@ -62,7 +62,7 @@ RUN cd /opt/hermes \
 #    (no pip binary), so install with `uv pip` into that interpreter. requests
 #    is already present in the base; globus-sdk is added here.
 # ---------------------------------------------------------------------------
-RUN uv pip install --python /opt/hermes/.venv/bin/python --no-cache globus-sdk requests
+RUN uv pip install --python /opt/hermes/.venv/bin/python --no-cache globus-sdk requests globus-compute-sdk
 COPY scripts/inference_auth_token.py /opt/alcf/inference_auth_token.py
 COPY scripts/alcf_facility_api_globus_token.py /opt/alcf/alcf_facility_api_globus_token.py
 
@@ -80,9 +80,10 @@ COPY config/SOUL.md /opt/alcf/SOUL.md
 COPY scripts/entrypoint.sh /opt/alcf/entrypoint.sh
 COPY scripts/iri_hello_world.py /opt/alcf/iri_hello_world.py
 COPY scripts/alcf_facility.py /opt/alcf/alcf_facility.py
+COPY scripts/alcf_remote_bash.py /opt/alcf/alcf_remote_bash.py
 RUN chmod +x /opt/alcf/entrypoint.sh /opt/alcf/inference_auth_token.py \
              /opt/alcf/alcf_facility_api_globus_token.py /opt/alcf/iri_hello_world.py \
-             /opt/alcf/alcf_facility.py \
+             /opt/alcf/alcf_facility.py /opt/alcf/alcf_remote_bash.py \
     && chown -R hermes:hermes /opt/alcf
 
 # Bake the ALCF-agent-box git revision + build date so the container can print
@@ -105,6 +106,7 @@ ENV ALCF_MODEL=google/gemma-4-31B-it \
     ALCF_DASHBOARD_PORT=8787 \
     ALCF_DASHBOARD_INTERNAL_PORT=9119 \
     ALCF_ENABLE_IRI=1 \
+    ALCF_ENABLE_REMOTE_BASH=0 \
     HERMES_HOME=/opt/data \
     XDG_DATA_HOME=/opt/data/.local/share \
     XDG_CONFIG_HOME=/opt/data/.config

@@ -83,6 +83,22 @@ if [[ "${ALCF_ENABLE_IRI:-1}" == "1" ]]; then
   fi
 fi
 
+# Optional: Globus Compute auth (remote-bash: build/run software on ALCF compute
+# nodes). This is a THIRD, separate Globus login and is OFF by default because it
+# runs arbitrary code under the user's allocation. Enable with
+# ALCF_ENABLE_REMOTE_BASH=1.
+REMOTE_BASH="$ALCF_DIR/alcf_remote_bash.py"
+if [[ "${ALCF_ENABLE_REMOTE_BASH:-0}" == "1" ]]; then
+  if ! "$PY" "$REMOTE_BASH" check >/dev/null 2>&1; then
+    log "Optional: authenticate to Globus Compute for remote-bash (build/run on"
+    log "ALCF compute nodes). This is a SEPARATE (third) Globus login. Press"
+    log "Ctrl-C to skip if you don't need to build software on ALCF right now."
+    echo
+    "$PY" "$REMOTE_BASH" authenticate || log "Globus Compute auth skipped/failed — remote-bash unavailable until you run it."
+    echo
+  fi
+fi
+
 # --- 3. Dashboard auth (required for a container 0.0.0.0 bind) ---------------
 # Hermes refuses a non-loopback dashboard bind without an auth gate. We hash a
 # password at start (plaintext never persisted). Password source, in order:
