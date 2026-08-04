@@ -34,8 +34,9 @@ right tool. remote-bash is for **synchronous, interactive** build/run commands.
 
 remote-bash runs **arbitrary code on ALCF charged to the user's allocation**, so:
 
-1. It is **DISABLED unless** the container was started with
-   `-e ALCF_ENABLE_REMOTE_BASH=1`. If disabled, the helper says so and exits.
+1. It is **ON by default** but can be hard-disabled by starting the container
+   with `-e ALCF_ENABLE_GLOBUS_COMPUTE=0`. If disabled, the helper says so and
+   exits. (The flag gates all Globus Compute access, not just remote-bash.)
 2. It requires a **one-time Globus Compute login** — a THIRD Globus login,
    separate from the inference and IRI logins. The agent cannot complete the
    browser login itself; ask the user to run the `authenticate` step on the host.
@@ -116,9 +117,9 @@ remote-bash runs **arbitrary code on ALCF charged to the user's allocation**, so
 
 ## Suggested agent flow
 
-1. Run `check`. If disabled → tell the user how to enable
-   (`-e ALCF_ENABLE_REMOTE_BASH=1`) and stop. If login missing → give the
-   `authenticate` command to run on the host and stop.
+1. Run `check`. If disabled → tell the user it was turned off with
+   `-e ALCF_ENABLE_GLOBUS_COMPUTE=0` (remove it to re-enable) and stop. If login
+   missing → give the `authenticate` command to run on the host and stop.
 2. Confirm the command + `--account` with the user, especially anything that
    writes or deletes files.
 3. Run it; report the compute node, exit code, and stdout/stderr plainly.

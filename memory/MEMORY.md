@@ -227,9 +227,10 @@ stderr. Docs: https://docs.alcf.anl.gov/services/globus-compute/ . The
 "build/compile/install/run X on ALCF" request.
 
 Key facts:
-- **OFF by default.** It only works if the container was started with
-  `-e ALCF_ENABLE_REMOTE_BASH=1` (it's arbitrary code under the user's
-  allocation). If disabled, tell the user how to enable it and stop.
+- **ON by default; prompts for the Globus Compute login at container start**
+  (like IRI). Can be hard-disabled with `-e ALCF_ENABLE_GLOBUS_COMPUTE=0` (the
+  flag gates all Globus Compute access). If disabled, tell the user it was turned
+  off and how to re-enable, then stop.
 - **Third, separate Globus login.** Distinct from the inference and IRI logins.
   You (the agent) CANNOT complete it yourself. If `check` says login is missing,
   ask the user to run on the host:

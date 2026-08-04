@@ -84,15 +84,17 @@ if [[ "${ALCF_ENABLE_IRI:-1}" == "1" ]]; then
 fi
 
 # Optional: Globus Compute auth (remote-bash: build/run software on ALCF compute
-# nodes). This is a THIRD, separate Globus login and is OFF by default because it
-# runs arbitrary code under the user's allocation. Enable with
-# ALCF_ENABLE_REMOTE_BASH=1.
+# nodes). This is a THIRD, separate Globus login. ON by default (consistent with
+# IRI); it runs code under the user's allocation, so it can be hard-disabled with
+# ALCF_ENABLE_GLOBUS_COMPUTE=0. Destructive commands still require --yes at run time.
 REMOTE_BASH="$ALCF_DIR/alcf_remote_bash.py"
-if [[ "${ALCF_ENABLE_REMOTE_BASH:-0}" == "1" ]]; then
+if [[ "${ALCF_ENABLE_GLOBUS_COMPUTE:-1}" == "1" ]]; then
+  # `check` exits 0 only when enabled AND a Globus Compute login exists; when we
+  # are here (enabled) a non-zero exit means the login is missing -> prompt.
   if ! "$PY" "$REMOTE_BASH" check >/dev/null 2>&1; then
-    log "Optional: authenticate to Globus Compute for remote-bash (build/run on"
-    log "ALCF compute nodes). This is a SEPARATE (third) Globus login. Press"
-    log "Ctrl-C to skip if you don't need to build software on ALCF right now."
+    log "Optional: authenticate to Globus Compute (lets the agent build/run"
+    log "software on ALCF compute nodes). This is a SEPARATE (third) Globus login."
+    log "Press Ctrl-C to skip if you only want inference/chat + IRI."
     echo
     "$PY" "$REMOTE_BASH" authenticate || log "Globus Compute auth skipped/failed — remote-bash unavailable until you run it."
     echo

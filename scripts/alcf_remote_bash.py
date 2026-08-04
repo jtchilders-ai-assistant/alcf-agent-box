@@ -17,8 +17,9 @@ Subcommands:
                    job submitted).
     run            Submit a bash command to a compute node and print the result.
 
-Everything is gated behind ALCF_ENABLE_REMOTE_BASH=1 because it is arbitrary
-remote code execution charged to the user's allocation. Default is OFF.
+Everything is gated behind ALCF_ENABLE_GLOBUS_COMPUTE (default ON). Set it to 0
+to hard-disable remote execution. Even when enabled, this runs arbitrary code on
+ALCF charged to the user's allocation, so destructive commands require --yes.
 
 Examples:
     PY=/opt/hermes/.venv/bin/python
@@ -105,16 +106,18 @@ def remote_bash(command: str, run_dir: str = "$HOME"):
 
 
 def _enabled() -> bool:
-    return os.environ.get("ALCF_ENABLE_REMOTE_BASH", "0") == "1"
+    return os.environ.get("ALCF_ENABLE_GLOBUS_COMPUTE", "1") == "1"
 
 
 def _require_enabled() -> None:
     if not _enabled():
         print(
-            "ERROR: remote-bash is DISABLED. This capability runs arbitrary shell\n"
-            "commands on ALCF compute nodes under your allocation, so it is opt-in.\n"
-            "Enable it by starting the container with:  -e ALCF_ENABLE_REMOTE_BASH=1\n"
-            "(and complete the one-time Globus Compute login: `authenticate`).",
+            "ERROR: Globus Compute access is DISABLED "
+            "(ALCF_ENABLE_GLOBUS_COMPUTE=0).\n"
+            "remote-bash runs arbitrary shell commands on ALCF compute nodes under\n"
+            "your allocation. It is ON by default; re-enable by starting the\n"
+            "container WITHOUT `-e ALCF_ENABLE_GLOBUS_COMPUTE=0` (and complete the\n"
+            "one-time Globus Compute login: `authenticate`).",
             file=sys.stderr,
         )
         sys.exit(4)
@@ -176,7 +179,7 @@ def _has_tokens() -> bool:
 def cmd_check(args) -> int:
     enabled = _enabled()
     toks = _has_tokens()
-    print(f"remote-bash enabled : {'yes' if enabled else 'no (set ALCF_ENABLE_REMOTE_BASH=1)'}")
+    print(f"globus compute      : {'enabled' if enabled else 'DISABLED (ALCF_ENABLE_GLOBUS_COMPUTE=0)'}")
     print(f"globus-compute login: {'present' if toks else 'MISSING (run: authenticate)'}")
     print(f"token store         : ~/.globus_compute/storage.db")
     print(f"endpoints           : " + ", ".join(f"{k}={v}" for k, v in MEPS.items()))
