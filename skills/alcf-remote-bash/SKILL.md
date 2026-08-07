@@ -75,32 +75,91 @@ remote-bash runs **arbitrary code on ALCF charged to the user's allocation**, so
         --cmd 'module load apptainer 2>/dev/null || module load singularity; \
                apptainer build $HOME/img.sif docker://ubuntu:22.04'
 
-    # Target Crux instead of Polaris:
+    # Target Crux instead of Polaris (endpoints: polaris, crux, sophia, edith):
     $PY /opt/alcf/alcf_remote_bash.py run --account <PROJECT> --endpoint crux \
         --cmd "hostname"
 
     # JSON output (for programmatic use):
     $PY /opt/alcf/alcf_remote_bash.py run --account <PROJECT> --json --cmd "uname -a"
 
+## Fast path: `batch` (many commands on ONE warm node)
+
+For an interactive build loop — compile → read error → fix → rebuild — do NOT
+issue a separate `run` per step. Each fresh `run` risks paying the ~1-minute
+cold start again if the endpoint idled out. Instead use `batch`, which runs a
+list of commands through a **single warm Executor session**: the first command
+pays cold start (~1 min), and every subsequent command reuses the **same compute
+node** and returns in **~1 second** (verified live: 20.9s cold, then 1.0s / 1.0s
+on the same node `x3108…`).
+
+    PY=/opt/hermes/.venv/bin/python
+
+    # Commands from a file, one per line (# comments + blank lines ignored):
+    $PY /opt/alcf/alcf_remote_bash.py batch --account <PROJECT> \
+        --run-dir '$HOME/myproj' --cmds-file steps.txt
+
+    # Or repeat --cmd (order preserved):
+    $PY /opt/alcf/alcf_remote_bash.py batch --account <PROJECT> \
+        --cmd 'module load spack-pe-base cmake' \
+        --cmd 'cmake -B build' \
+        --cmd 'cmake --build build -j'
+
+`batch` stops at the first non-zero exit (so a failed configure doesn't waste a
+build) unless you pass `--keep-going`. This is the recommended mode whenever you
+have 2+ steps.
+
+**Pitfall — one command per line:** in `--cmds-file`, each line is a *separate*
+`bash -lc` invocation, so a multi-line construct (a `<<EOF` heredoc, a `for`/`if`
+block spanning lines) will break — its lines run as independent commands. Keep
+each step on a single line. To write a file on the node, use a single-line form,
+e.g. `printf '...\n' > f` or `echo '...' > f`, not a multi-line heredoc. State
+does persist across steps in a batch (same node, same filesystem, same `--run-dir`
+and any activated `--venv`), so files/vars a step creates are visible to later
+steps — just keep each command itself one line.
+
+### Activating a venv on the node (`--venv`)
+
+Both `run` and `batch` accept `--venv <path>` to `source <path>/bin/activate`
+before every command in the session — handy for Python builds/tests that need a
+specific environment on the cluster filesystem:
+
+    $PY /opt/alcf/alcf_remote_bash.py batch --account <PROJECT> \
+        --venv /eagle/<project>/<you>/myenv --cmds-file test_steps.txt
+
+(Point `--venv` at YOUR environment on a cluster filesystem; there is no default.)
+
 ### Options
 
 - `--account` (required): ALCF project charged for the PBS job.
-- `--cmd` (required): shell command; runs under `bash -lc` (so `module` works).
-- `--endpoint`: `polaris` (default) or `crux`.
+- `--cmd` (required for `run`; repeatable for `batch`): shell command; runs under
+  `bash -lc` (so `module` works).
+- `--cmds-file` (`batch` only): file with one command per line.
+- `--endpoint`: `polaris` (default), `crux`, `sophia`, or `edith`.
 - `--queue`: PBS queue (default `debug`).
 - `--walltime`: `HH:MM:SS` (default `0:10:00`). Raise for long builds.
 - `--nodes`: nodes per block (default 1).
 - `--run-dir`: working dir on the cluster (default `$HOME`).
-- `--timeout`: seconds to wait for the result (default 1200).
+- `--venv`: cluster venv to `source .../bin/activate` before each command.
+- `--timeout`: seconds to wait per command result (default 1200).
+- `--keep-going` (`batch` only): continue after a non-zero exit.
 - `--yes`: allow a destructive-looking command (confirm with the user first).
 
 ## Behavior & pitfalls (verified 2026-08-04)
 
 - **Runs under the user's identity/allocation.** `whoami` on the node is the
   user; the job appears as their PBS job (`PBS_ENVIRONMENT=PBS_BATCH`).
-- **Latency:** first call is ~1 min (the MEP boots a per-user endpoint + a PBS
-  job + the node). Subsequent calls while the endpoint is warm are **seconds**.
-  Tell the user the first build command will take about a minute to start.
+- **Latency & warm reuse:** first call is ~1 min (the MEP boots a per-user
+  endpoint + a PBS job + the node). Subsequent calls while the endpoint is warm
+  are **~1 second** (verified live: 20.9s cold → 1.0s → 1.0s on the same node).
+  The node stays warm because the MEP keeps the PBS block alive between
+  submissions. **To exploit this, use `batch`** (many commands in one session) —
+  or, for separate `run` calls, keep `--endpoint/--account/--queue/--walltime`
+  IDENTICAL so a later call lands on the still-running block. Changing any of
+  those forces a new block (cold start again).
+- **Output size cap:** Globus Compute caps a result payload at ~10 MB. The helper
+  truncates combined stdout+stderr on the node to stay under that, appending a
+  `[truncated — N bytes total]` marker. A very chatty build won't blow up the RPC,
+  but if you need full logs, redirect to a file on the cluster and fetch it.
 - **`module load` is needed** for apptainer/singularity and many tools — they
   are NOT on the default PATH. The helper already uses `bash -lc`, so `module`
   resolves; you still have to `module load` the specific tool in `--cmd`.
