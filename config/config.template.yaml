@@ -26,6 +26,18 @@ model:
   # Hermes strip it for this provider. REQUIRED for tools to work here.
   strip_tool_message_name: true
 
+  # The REAL serving context window for this model, in tokens (prompt+completion
+  # combined). ALCF caps some models below their published spec (e.g. Sophia
+  # serves gemma-4-31B-it at 128000, not the 256000 Hermes assumes from the model
+  # family). Hermes' hardcoded family table would otherwise over-estimate the
+  # window, so its footer/auto-compression fire too late and a request that
+  # overflows the real window makes the gateway silently drop the SSE stream
+  # (surfaced as EmptyStreamError). Setting model.context_length is the highest-
+  # priority override in Hermes, so this makes the footer + compression accurate.
+  # entrypoint.sh resolves this from the server's max_model_len at start (falling
+  # back to ALCF_CONTEXT_LENGTH / 128000 if the lookup fails).
+  context_length: ${ALCF_CONTEXT_LENGTH}
+
 agent:
   # Trim toolsets that make no sense in this packaged, single-user context.
   disabled_toolsets:

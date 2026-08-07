@@ -117,12 +117,23 @@ export ALCF_DASHBOARD_PASSWORD_HASH="$("$PY" -c "from plugins.dashboard_auth.bas
 
 # --- 4. Render config (Python; no envsubst in the base image) ---------------
 render_config() {
-  local token
+  local token ctxlen
   token="$("$PY" "$INFER_AUTH" get_access_token)"
+  # Resolve the REAL serving context window from the server's max_model_len
+  # (ALCF caps some models below their published spec; Hermes' family table would
+  # otherwise over-estimate it). Falls back to $ALCF_CONTEXT_LENGTH / 128000 if
+  # the lookup fails. Never fatal.
+  ctxlen="$(ALCF_INFER_AUTH="$INFER_AUTH" ALCF_PY="$PY" \
+            "$PY" "$ALCF_DIR/resolve_context_length.py" \
+            "$ALCF_BASE_URL" "${ALCF_MODEL:-google/gemma-4-31B-it}" 2>>/tmp/ctxlen.log)"
+  # Guard: if the resolver printed nothing usable, hard-default here too.
+  case "$ctxlen" in ''|*[!0-9]*) ctxlen=128000 ;; esac
+  log "Model context window: $ctxlen tokens (from max_model_len; see /tmp/ctxlen.log)"
   ALCF_ACCESS_TOKEN="$token" \
   ALCF_BASE_URL="$ALCF_BASE_URL" \
   ALCF_MODEL="${ALCF_MODEL:-google/gemma-4-31B-it}" \
   ALCF_MAX_TOKENS="${ALCF_MAX_TOKENS:-2048}" \
+  ALCF_CONTEXT_LENGTH="$ctxlen" \
   ALCF_DASHBOARD_USER="$ALCF_DASHBOARD_USER" \
   ALCF_DASHBOARD_PASSWORD_HASH="$ALCF_DASHBOARD_PASSWORD_HASH" \
   "$PY" - "$ALCF_DIR/config.template.yaml" "$CONFIG_OUT" <<'PYEOF'
