@@ -82,21 +82,45 @@ dashboard:
 # NOTE: gpt-oss-* are REASONING models (hidden reasoning consumes max_tokens);
 # the non-reasoning models (llama/gemma/mistral/nemotron) feel snappier for
 # plain chat. Cold models can take 10-15 min to load on first request.
+#
+# `models` is a MAPPING (id -> {context_length}), NOT a bare list, so each model
+# carries its REAL serving window. This is essential: the ALCF gateway serves
+# different models at very different `max_model_len` (gemma-4-31B-it=128000,
+# gpt-oss-120b=65536, Mistral/Mixtral=16384, ...). Hermes honours these per-model
+# `custom_providers[].models.<id>.context_length` overrides on an in-session
+# `/model` switch (Hermes #15779); without them a switch falls back to Hermes'
+# static family table (often too large) and a request overflows the real window
+# -> the gateway silently drops the SSE stream (EmptyStreamError). entrypoint.sh
+# regenerates this mapping from the server's max_model_len at start.
 custom_providers:
   - name: alcf-inference
     base_url: "${ALCF_BASE_URL}"
     api_key: "${ALCF_ACCESS_TOKEN}"
     # Disable live /v1/models discovery — the ALCF gateway 404s that path.
     discover_models: false
+    # NOTE: this whole `models:` mapping is REPLACED at container start by
+    # entrypoint.sh with server-resolved context_length values. The block below
+    # is a static fallback used only if that regeneration is skipped.
     models:
-      - openai/gpt-oss-120b
-      - openai/gpt-oss-20b
-      - meta-llama/Llama-3.3-70B-Instruct
-      - meta-llama/Meta-Llama-3.1-8B-Instruct
-      - meta-llama/Llama-4-Maverick-17B-128E-Instruct
-      - meta-llama/Llama-4-Scout-17B-16E-Instruct
-      - google/gemma-4-31B-it
-      - mistralai/Mixtral-8x22B-Instruct-v0.1
-      - mistralai/Mistral-Large-Instruct-2407
-      - nvidia/nemotron-3-super-120b
-      - argonne/AuroraGPT-IT-v4-0125
+      openai/gpt-oss-120b:
+        context_length: 65536
+      openai/gpt-oss-20b:
+        context_length: 128000
+      meta-llama/Llama-3.3-70B-Instruct:
+        context_length: 32768
+      meta-llama/Meta-Llama-3.1-8B-Instruct:
+        context_length: 32768
+      meta-llama/Llama-4-Maverick-17B-128E-Instruct:
+        context_length: 16384
+      meta-llama/Llama-4-Scout-17B-16E-Instruct:
+        context_length: 32768
+      google/gemma-4-31B-it:
+        context_length: 128000
+      mistralai/Mixtral-8x22B-Instruct-v0.1:
+        context_length: 16384
+      mistralai/Mistral-Large-Instruct-2407:
+        context_length: 16384
+      nvidia/nemotron-3-super-120b:
+        context_length: 262144
+      argonne/AuroraGPT-IT-v4-0125:
+        context_length: 128000
