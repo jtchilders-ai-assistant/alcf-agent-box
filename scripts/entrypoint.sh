@@ -176,6 +176,37 @@ managed_seed() {  # $1=source file, $2=dest file, $3=label
   fi
 }
 
+# Some Hermes code paths (config load during startup) write a STOCK default
+# SOUL.md into $HERMES_HOME before this seed step runs, and older volumes carry
+# one from a pre-ALCF-SOUL image. A stock/legacy SOUL.md has no ALCF seed stamp,
+# so managed_seed would treat it as "user-edited" and KEEP it -- the ALCF
+# identity would never land, and a fresh "what can you do?" would answer as
+# generic Hermes with no mention of ALCF. Detect the stock/legacy Hermes SOUL
+# (which carries zero ALCF/user intent) and delete it so managed_seed can seed
+# the real ALCF identity. This is order-independent: it fixes both the
+# fresh-volume race and stale volumes. A genuinely user-customized SOUL.md
+# (anything not matching these known-stock signatures) is left untouched.
+is_stock_hermes_soul() {  # $1=path -> exit 0 if it's the stock/legacy Hermes default
+  local f="$1"
+  [[ -f "$f" ]] || return 1
+  # Signature 1: the current DEFAULT_SOUL_MD one-liner (identity by its opening).
+  if head -c 200 "$f" | grep -q "You are Hermes Agent, an intelligent AI assistant created by Nous Research"; then
+    return 0
+  fi
+  # Signature 2: the legacy comment-only scaffold (no persona text at all) --
+  # every non-blank line is an HTML comment / markdown heading, no real content.
+  if grep -q "This file defines the agent's personality and tone" "$f" 2>/dev/null; then
+    return 0
+  fi
+  return 1
+}
+SOUL_DST="$HERMES_HOME/SOUL.md"
+SOUL_STAMP="$STAMP_DIR/$(echo "$SOUL_DST" | md5sum | cut -d' ' -f1).sha"
+if [[ -f "$SOUL_DST" && ! -f "$SOUL_STAMP" ]] && is_stock_hermes_soul "$SOUL_DST"; then
+  rm -f "$SOUL_DST"
+  log "Replacing stock Hermes SOUL.md with the ALCF Agent identity"
+fi
+
 managed_seed "$ALCF_DIR/memory/MEMORY.md" "$HERMES_HOME/memories/MEMORY.md" "ALCF knowledge base (memories/MEMORY.md)"
 managed_seed "$ALCF_DIR/SOUL.md" "$HERMES_HOME/SOUL.md" "ALCF Agent identity (SOUL.md)"
 # Skills: refresh each SKILL.md tree wholesale when unmodified (skills are
