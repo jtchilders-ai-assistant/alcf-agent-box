@@ -279,13 +279,91 @@ def build_block(include_metis: bool = True) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _fetch_hot(cluster: str, token: str) -> set:
+    """Return the set of model ids currently RUNNING (hot) on a cluster.
+
+    Reads .../<cluster>/jobs. Each running entry's "Models" field may list
+    several comma-joined ids (e.g. "openai/gpt-oss-120b,openai/gpt-oss-20b"),
+    so we split on commas. Never raises — returns an empty set on any failure
+    (the caller then reports "unknown", not "cold", so we don't lie).
+    """
+    url = f"{INFER_HOST}/{cluster}/jobs"
+    req = urllib.request.Request(url, headers={"Authorization": "Bearer " + token})
+    hot: set = set()
+    with urllib.request.urlopen(req, timeout=30) as r:
+        doc = json.load(r)
+    running = doc.get("running", []) if isinstance(doc, dict) else []
+    for job in running:
+        if not isinstance(job, dict):
+            continue
+        if str(job.get("Model Status", "")).lower() not in ("", "running"):
+            continue
+        for mid in str(job.get("Models", "")).split(","):
+            mid = mid.strip()
+            if mid:
+                hot.add(mid)
+    return hot
+
+
+def hot_report() -> int:
+    """Print a hot/cold status banner for the OFFERED models on each cluster.
+
+    Cross-references the models we put in the dropdown against the live /jobs
+    hot set so the user knows, before touching the picker, which models answer
+    instantly and which trigger a ~10-15 min ALCF GPU cold-load (HTTP 503
+    "online but not ready" until warm). Best-effort: any failure downgrades a
+    line to "status unknown" rather than emitting a wrong hot/cold claim.
+    """
+    try:
+        token = _get_token()
+    except Exception as e:  # noqa: BLE001
+        print(f"[hot-report] token fetch failed ({e}); skipping hot/cold banner",
+              file=sys.stderr)
+        return 0
+
+    include_metis = os.environ.get("ALCF_ENABLE_METIS", "1") != "0"
+    clusters = [("sophia", _select_sophia, SOPHIA_FALLBACK)]
+    if include_metis:
+        clusters.append(("metis", _select_metis, METIS_FALLBACK))
+
+    lines = ["Model warm-up status (ALCF loads cold models on first use, ~10-15 min):"]
+    for cluster, selector, fallback in clusters:
+        offered, _src = _resolve_cluster(cluster, token, selector, fallback)
+        try:
+            hot = _fetch_hot(cluster, token)
+            known = True
+        except Exception as e:  # noqa: BLE001
+            print(f"[hot-report] {cluster} /jobs failed ({e})", file=sys.stderr)
+            hot, known = set(), False
+        hot_ids = sorted(m for m in offered if m in hot)
+        cold_ids = sorted(m for m in offered if m not in hot)
+        lines.append(f"  {cluster}:")
+        if not known:
+            lines.append(f"    status unknown (could not read /jobs) — "
+                         f"{len(offered)} models offered")
+            continue
+        lines.append(f"    HOT  (instant): {', '.join(hot_ids) if hot_ids else '(none)'}")
+        lines.append(f"    cold (~10-15m): {', '.join(cold_ids) if cold_ids else '(none)'}")
+    lines.append("  Tip: selecting a cold model returns HTTP 503 'online but not "
+                 "ready' for a few minutes; wait and retry — it is loading, not broken.")
+    # Emit to stdout so the entrypoint can `log` it line-by-line.
+    sys.stdout.write("\n".join(lines) + "\n")
+    return 0
+
+
 def main() -> int:
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="", help="also write the block to this path")
     ap.add_argument("--no-metis", action="store_true",
                     help="omit the Metis provider")
+    ap.add_argument("--hot-report", action="store_true",
+                    help="print a hot/cold warm-up status banner instead of the "
+                         "custom_providers block (queries /jobs)")
     args = ap.parse_args()
+
+    if args.hot_report:
+        return hot_report()
 
     include_metis = not args.no_metis and os.environ.get("ALCF_ENABLE_METIS", "1") != "0"
     block = build_block(include_metis=include_metis)

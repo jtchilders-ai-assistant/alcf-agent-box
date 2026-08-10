@@ -233,6 +233,20 @@ PYEOF
 render_config
 log "Config rendered -> $CONFIG_OUT (cluster=$ALCF_CLUSTER model=${ALCF_MODEL:-google/gemma-4-31B-it})"
 
+# --- 4b. Model warm-up (hot/cold) status banner -----------------------------
+# The model dropdown lists the full ALCF catalog, but ALCF only keeps a subset
+# loaded on GPU at any time. Selecting a "cold" model triggers a 10-15 min load
+# and returns HTTP 503 "online but not ready" in the meantime -- which looks
+# like a failure but is just warm-up. Print which offered models are hot now so
+# the user can pick an instant one or know to wait. Purely informational and
+# best-effort: never fatal (|| true), and the script itself reports "unknown"
+# rather than guessing if /jobs is unreachable.
+if [ "${ALCF_SHOW_MODEL_STATUS:-1}" != "0" ]; then
+  ALCF_INFER_AUTH="$INFER_AUTH" ALCF_PY="$PY" \
+    "$PY" "$ALCF_DIR/populate_models.py" --hot-report 2>>/tmp/populate_models.log \
+    | while IFS= read -r line; do log "$line"; done || true
+fi
+
 # --- 5. Seed / refresh skills + memory ---------------------------------------
 # ALCF skills and the knowledge base are IMAGE-MANAGED: we refresh them from the
 # image on every start so knowledge-base fixes land for users who keep their
