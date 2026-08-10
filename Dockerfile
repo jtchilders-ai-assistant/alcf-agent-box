@@ -82,10 +82,11 @@ COPY scripts/iri_hello_world.py /opt/alcf/iri_hello_world.py
 COPY scripts/alcf_facility.py /opt/alcf/alcf_facility.py
 COPY scripts/alcf_remote_bash.py /opt/alcf/alcf_remote_bash.py
 COPY scripts/resolve_context_length.py /opt/alcf/resolve_context_length.py
+COPY scripts/populate_models.py /opt/alcf/populate_models.py
 RUN chmod +x /opt/alcf/entrypoint.sh /opt/alcf/inference_auth_token.py \
              /opt/alcf/alcf_facility_api_globus_token.py /opt/alcf/iri_hello_world.py \
              /opt/alcf/alcf_facility.py /opt/alcf/alcf_remote_bash.py \
-             /opt/alcf/resolve_context_length.py \
+             /opt/alcf/resolve_context_length.py /opt/alcf/populate_models.py \
     && chown -R hermes:hermes /opt/alcf
 
 # Bake the ALCF-agent-box git revision + build date so the container can print

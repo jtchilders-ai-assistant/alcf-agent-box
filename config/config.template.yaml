@@ -69,58 +69,71 @@ dashboard:
     username: "${ALCF_DASHBOARD_USER}"
     password_hash: "${ALCF_DASHBOARD_PASSWORD_HASH}"
 
-# Curated switchable models. The ALCF gateway does NOT serve the standard
-# OpenAI `/v1/models` path (404), so we declare a hand-picked model list here
-# instead of relying on live discovery. All entries share the same endpoint +
-# Globus token, so switching is just a different `model` value.
+# Curated switchable models — GENERATED AT CONTAINER START by
+# scripts/populate_models.py, which queries the ALCF-specific
+# `.../<cluster>/models` endpoint on BOTH clusters (the gateway 404s the standard
+# OpenAI `/v1/models` path, so Hermes' own live discovery can't work) and emits
+# one `custom_providers` entry per cluster:
 #
-# In the web chat model dropdown (or `/model <id>` in chat), pick any of these.
-# The full live catalog is 40+ models (incl. embeddings + science models like
-# AuroraGPT/GenSLM); ask the agent "what models are on ALCF inference?" and it
-# will query the service directly.
+#   - alcf-sophia  (vLLM,   full OpenAI-compat)   .../sophia/vllm/v1
+#   - alcf-metis   (SambaNova, chat-only)         .../metis/api/v1
 #
-# NOTE: gpt-oss-* are REASONING models (hidden reasoning consumes max_tokens);
-# the non-reasoning models (llama/gemma/mistral/nemotron) feel snappier for
-# plain chat. Cold models can take 10-15 min to load on first request.
+# It filters the catalog to CHAT models (dropping embeddings, vision, and science
+# models like GenSLM/dinov3/sam3) and gives each its REAL serving context window.
+# This matters because the gateway serves different models — even the SAME-NAMED
+# model on different clusters — at very different windows (Sophia gemma-4-31B-it
+# =128000 vs Metis gemma-4-31B-it=131072; Metis Mistral-Large-3=8192). Hermes
+# honours per-model `custom_providers[].models.<id>.context_length` overrides on
+# an in-session `/model` switch (Hermes #15779); without the correct window a
+# switch overflows the real context and the gateway silently drops the SSE stream
+# (EmptyStreamError). The two providers appear separately in the dropdown so
+# same-named models across clusters don't collide.
 #
-# `models` is a MAPPING (id -> {context_length}), NOT a bare list, so each model
-# carries its REAL serving window. This is essential: the ALCF gateway serves
-# different models at very different `max_model_len` (gemma-4-31B-it=128000,
-# gpt-oss-120b=65536, Mistral/Mixtral=16384, ...). Hermes honours these per-model
-# `custom_providers[].models.<id>.context_length` overrides on an in-session
-# `/model` switch (Hermes #15779); without them a switch falls back to Hermes'
-# static family table (often too large) and a request overflows the real window
-# -> the gateway silently drops the SSE stream (EmptyStreamError). entrypoint.sh
-# regenerates this mapping from the server's max_model_len at start.
+# gpt-oss-* are REASONING models (hidden reasoning consumes max_tokens); the
+# non-reasoning models (llama/gemma/mistral/nemotron) feel snappier for plain
+# chat. Cold models can take 10-15 min to load on first request.
+#
+# HOW THE REPLACEMENT WORKS: entrypoint.sh replaces everything from the sentinel
+# line below (inclusive) to end-of-file with the generated block. The static
+# `custom_providers:` here is a committed FALLBACK that (a) keeps this template
+# valid YAML and (b) is used only if the sentinel replacement is skipped
+# entirely. populate_models.py ALSO emits its own static fallback on any
+# discovery failure, so the live config always has a valid, useful block.
+#__ALCF_CUSTOM_PROVIDERS__  (entrypoint replaces from this line to EOF)
 custom_providers:
-  - name: alcf-inference
-    base_url: "${ALCF_BASE_URL}"
+  - name: alcf-sophia
+    base_url: "https://inference-api.alcf.anl.gov/resource_server/sophia/vllm/v1"
     api_key: "${ALCF_ACCESS_TOKEN}"
-    # Disable live /v1/models discovery — the ALCF gateway 404s that path.
     discover_models: false
-    # NOTE: this whole `models:` mapping is REPLACED at container start by
-    # entrypoint.sh with server-resolved context_length values. The block below
-    # is a static fallback used only if that regeneration is skipped.
+    # NOTE: only models whose REAL ALCF serving window is >= 64000 tokens are
+    # listed. Hermes refuses to load any model below its 64k MINIMUM_CONTEXT_LENGTH
+    # floor, so a sub-floor model would be a broken dropdown entry. ALCF caps many
+    # models (all Llama 3.x/4, Mixtral, Devstral, Mistral-Large-2407) at 16k-32k,
+    # so they are intentionally absent here and from the generated live list.
     models:
       openai/gpt-oss-120b:
         context_length: 65536
       openai/gpt-oss-20b:
         context_length: 128000
-      meta-llama/Llama-3.3-70B-Instruct:
-        context_length: 32768
-      meta-llama/Meta-Llama-3.1-8B-Instruct:
-        context_length: 32768
-      meta-llama/Llama-4-Maverick-17B-128E-Instruct:
-        context_length: 16384
-      meta-llama/Llama-4-Scout-17B-16E-Instruct:
-        context_length: 32768
       google/gemma-4-31B-it:
         context_length: 128000
-      mistralai/Mixtral-8x22B-Instruct-v0.1:
-        context_length: 16384
-      mistralai/Mistral-Large-Instruct-2407:
-        context_length: 16384
+      google/gemma-4-26B-A4B-it:
+        context_length: 262144
+      arcee-ai/Trinity-Large-Thinking-W4A16:
+        context_length: 131072
       nvidia/nemotron-3-super-120b:
         context_length: 262144
       argonne/AuroraGPT-IT-v4-0125:
         context_length: 128000
+  - name: alcf-metis
+    base_url: "https://inference-api.alcf.anl.gov/resource_server/metis/api/v1"
+    api_key: "${ALCF_ACCESS_TOKEN}"
+    discover_models: false
+    # Metis reports no server window; values are empirically verified. Only >=64k
+    # models are listed — Mistral-Large-3 (Metis) serves at just 8192 and is
+    # excluded (Hermes would reject it).
+    models:
+      gpt-oss-120b:
+        context_length: 131072
+      gemma-4-31B-it:
+        context_length: 131072

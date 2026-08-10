@@ -117,18 +117,87 @@ export ALCF_DASHBOARD_PASSWORD_HASH="$("$PY" -c "from plugins.dashboard_auth.bas
 
 # --- 4. Render config (Python; no envsubst in the base image) ---------------
 render_config() {
-  local token ctxlen
+  local token ctxlen providers_block
   token="$("$PY" "$INFER_AUTH" get_access_token)"
-  # Resolve the REAL serving context window from the server's max_model_len
-  # (ALCF caps some models below their published spec; Hermes' family table would
-  # otherwise over-estimate it). Falls back to $ALCF_CONTEXT_LENGTH / 128000 if
-  # the lookup fails. Never fatal.
+  # Resolve the REAL serving context window for the LAUNCH model from the
+  # server's max_model_len (ALCF caps some models below their published spec;
+  # Hermes' family table would otherwise over-estimate it). Falls back to
+  # $ALCF_CONTEXT_LENGTH / 128000 if the lookup fails. Never fatal.
   ctxlen="$(ALCF_INFER_AUTH="$INFER_AUTH" ALCF_PY="$PY" \
             "$PY" "$ALCF_DIR/resolve_context_length.py" \
             "$ALCF_BASE_URL" "${ALCF_MODEL:-google/gemma-4-31B-it}" 2>>/tmp/ctxlen.log)"
   # Guard: if the resolver printed nothing usable, hard-default here too.
   case "$ctxlen" in ''|*[!0-9]*) ctxlen=128000 ;; esac
   log "Model context window: $ctxlen tokens (from max_model_len; see /tmp/ctxlen.log)"
+
+  # Generate the switchable-model `custom_providers:` block from the LIVE ALCF
+  # catalog on BOTH clusters (sophia + metis). populate_models.py filters to chat
+  # models and assigns each its real serving context window; it always prints a
+  # valid block (committed static fallback on any discovery failure), so this is
+  # never fatal. ALCF_ENABLE_METIS=0 drops the Metis provider.
+  providers_block="$(ALCF_INFER_AUTH="$INFER_AUTH" ALCF_PY="$PY" \
+            ALCF_ENABLE_METIS="${ALCF_ENABLE_METIS:-1}" \
+            "$PY" "$ALCF_DIR/populate_models.py" 2>>/tmp/populate_models.log)"
+  # Guard: a generated block MUST start with 'custom_providers:'. If somehow it
+  # didn't (script crashed hard), leave $providers_block empty so the splice step
+  # keeps the template's committed static fallback instead.
+  case "$providers_block" in
+    custom_providers:*) log "Model list generated from live catalog (see /tmp/populate_models.log)" ;;
+    *) providers_block=""; err "populate_models produced no block; keeping static fallback list" ;;
+  esac
+
+  # --- Launch-model context floor guard ------------------------------------
+  # Hermes hard-refuses to start any model whose context window is below its
+  # MINIMUM_CONTEXT_LENGTH (64000). The ALCF gateway caps many models well below
+  # that (all Llama 3.x/4, Mixtral, Devstral, Mistral-Large-2407 serve at
+  # 16k-32k), so a user who overrides ALCF_MODEL to one of those would otherwise
+  # hit a raw Hermes stacktrace at launch. Refuse EARLY with an actionable list
+  # of valid models instead.
+  #
+  # ROBUST-AGAINST-ITS-OWN-FAILURE by construction:
+  #   * $ctxlen was already defaulted to 128000 on ANY resolver failure (see the
+  #     `case` above), and 128000 >= floor, so a broken/unreachable resolver
+  #     NEVER trips this guard -- it fails OPEN (launch proceeds), never closed.
+  #   * We only block on a genuine, positive sub-floor integer reading.
+  #   * The valid-model list is derived from the block we just generated; if that
+  #     extraction yields nothing (block empty/unparseable) we fall back to a
+  #     hardcoded hint so the message is always useful. No step here can abort
+  #     the launch except the one intentional `exit 78`.
+  local floor=64000 launch_model valid_list
+  launch_model="${ALCF_MODEL:-google/gemma-4-31B-it}"
+  # Compare defensively: only treat $ctxlen as sub-floor when it is a clean
+  # positive integer AND strictly less than the floor. `case` already guarantees
+  # $ctxlen is all-digits, but re-check so this block is safe if moved.
+  if printf '%s' "$ctxlen" | grep -Eq '^[0-9]+$' && [ "$ctxlen" -gt 0 ] && [ "$ctxlen" -lt "$floor" ]; then
+    # Extract the sophia provider's model ids from the generated block for the
+    # hint. `|| true` so a grep miss can't abort under `set -e`.
+    valid_list="$(printf '%s\n' "$providers_block" \
+      | sed -n '/name: alcf-sophia/,/name: alcf-metis/p' \
+      | grep -E '^      [A-Za-z0-9].*:$' \
+      | sed -E 's/^ +//; s/:$//' \
+      | sort | awk 'NR>1{printf ", "}{printf "%s",$0}END{print ""}' 2>/dev/null || true)"
+    if [ -z "$valid_list" ]; then
+      valid_list="openai/gpt-oss-120b, openai/gpt-oss-20b, google/gemma-4-31B-it, google/gemma-4-26B-A4B-it, nvidia/nemotron-3-super-120b, argonne/AuroraGPT-IT-v4-0125"
+    fi
+    err "======================================================================"
+    err "REFUSING TO START: model '$launch_model' has a context window of"
+    err "$ctxlen tokens on the ALCF gateway, below Hermes' required minimum of"
+    err "$floor tokens (Hermes rejects smaller windows at load)."
+    err ""
+    err "The ALCF inference service caps many models (all Llama 3.x/4, Mixtral,"
+    err "Devstral, Mistral-Large-2407) below 64k, which makes them unusable in"
+    err "Hermes regardless of their published spec."
+    err ""
+    err "Set ALCF_MODEL to one of these >=64k models and restart the container:"
+    err "  $valid_list"
+    err "======================================================================"
+    exit 78   # EX_CONFIG: launch configuration is invalid
+  fi
+  # --- end launch-model context floor guard --------------------------------
+
+  # Render: substitute ${...} placeholders, and splice the generated providers
+  # block over the sentinel-to-EOF region of the template. The generated block
+  # still contains ${ALCF_ACCESS_TOKEN}, so we splice FIRST then substitute.
   ALCF_ACCESS_TOKEN="$token" \
   ALCF_BASE_URL="$ALCF_BASE_URL" \
   ALCF_MODEL="${ALCF_MODEL:-google/gemma-4-31B-it}" \
@@ -136,10 +205,26 @@ render_config() {
   ALCF_CONTEXT_LENGTH="$ctxlen" \
   ALCF_DASHBOARD_USER="$ALCF_DASHBOARD_USER" \
   ALCF_DASHBOARD_PASSWORD_HASH="$ALCF_DASHBOARD_PASSWORD_HASH" \
+  ALCF_PROVIDERS_BLOCK="$providers_block" \
   "$PY" - "$ALCF_DIR/config.template.yaml" "$CONFIG_OUT" <<'PYEOF'
 import os, sys, string
 src, dst = sys.argv[1], sys.argv[2]
 tmpl = open(src, encoding="utf-8").read()
+
+# Splice: replace from the sentinel line (inclusive) to EOF with the generated
+# custom_providers block, when one was produced. The sentinel is a YAML comment,
+# so the template stays valid even if this splice is skipped.
+SENTINEL = "#__ALCF_CUSTOM_PROVIDERS__"
+block = os.environ.get("ALCF_PROVIDERS_BLOCK", "").strip()
+if block:
+    idx = tmpl.find(SENTINEL)
+    if idx != -1:
+        # cut back to the start of the sentinel's line
+        line_start = tmpl.rfind("\n", 0, idx) + 1
+        tmpl = tmpl[:line_start] + block + "\n"
+    else:
+        sys.stderr.write("[entrypoint] sentinel not found; using template as-is\n")
+
 # Substitute ${VAR} placeholders from the environment; leave unknown ones as-is.
 out = string.Template(tmpl).safe_substitute(os.environ)
 open(dst, "w", encoding="utf-8").write(out)
