@@ -148,7 +148,8 @@ running config at container start. Environment variables you can override at
 |---|---|---|
 | `ALCF_MODEL` | `google/gemma-4-31B-it` | Model id on the inference service |
 | `ALCF_CLUSTER` | `sophia` | `sophia` (vLLM) or `metis` (SambaNova) |
-| `ALCF_MAX_TOKENS` | `2048` | Output cap (reasoning models need headroom) |
+| `ALCF_MAX_TOKENS` | `2048` | Baseline per-response output cap for **plain chat** models |
+| `ALCF_REASONING_MAX_TOKENS` | `12288` | Per-response output cap for **reasoning** models (gpt-oss, gemma-4, nemotron-3-super, *-Thinking). They spend part of the output budget on a hidden reasoning channel, so they need more headroom than chat models. |
 | `ALCF_DASHBOARD_PORT` | `8787` | Web chat port inside the container |
 | `ALCF_DASHBOARD_USER` | `alcf` | Dashboard login username |
 | `ALCF_DASHBOARD_PASSWORD` | *(auto-generated + printed)* | Dashboard login password (hashed at start; plaintext never stored) |

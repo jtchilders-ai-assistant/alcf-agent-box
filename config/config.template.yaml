@@ -11,15 +11,35 @@
 model:
   # The ALCF Inference Service is OpenAI-compatible. provider: custom tells
   # Hermes to treat base_url as a raw OpenAI-wire endpoint.
-  provider: custom
+  #
+  # provider is set to a NAMED custom provider (custom:alcf-sophia[-reasoning])
+  # by the entrypoint so the LAUNCH turn inherits that provider's per-model
+  # output cap (max_tokens). The entrypoint picks the -reasoning variant when the
+  # launch model is a reasoning model. This matters because Hermes has no
+  # top-level per-model max_tokens: the per-PROVIDER cap on a custom_providers
+  # entry is only applied when the top-level model.max_tokens is UNSET (see
+  # below), so we deliberately DO NOT set model.max_tokens here.
+  provider: "${ALCF_LAUNCH_PROVIDER}"
   base_url: "${ALCF_BASE_URL}"        # e.g. https://inference-api.alcf.anl.gov/resource_server/sophia/vllm/v1
   api_key: "${ALCF_ACCESS_TOKEN}"     # Globus access token, injected + refreshed by entrypoint
   model: "${ALCF_MODEL}"              # e.g. google/gemma-4-31B-it
   default: "${ALCF_MODEL}"
 
-  # Reasoning models (gpt-oss-*) spend the output budget on a hidden reasoning
-  # channel; too small a cap yields empty content. Give them headroom.
-  max_tokens: ${ALCF_MAX_TOKENS}
+  # NOTE: model.max_tokens is intentionally NOT set here.
+  #
+  # Reasoning models (gpt-oss-*, gemma-4-*, nemotron-3-super, *-Thinking) emit a
+  # hidden reasoning channel that DRAWS FROM THE SAME output budget as the visible
+  # answer; too small a cap yields empty content (finish_reason=length). They need
+  # more headroom than plain chat models — i.e. a PER-MODEL cap.
+  #
+  # Hermes has no per-model max_tokens (unlike context_length). It DOES honour a
+  # per-PROVIDER max_tokens on a custom_providers entry, but ONLY when the
+  # top-level model.max_tokens is unset (runtime_provider._lift_max_output_tokens;
+  # api_server / gateway apply the global key first, per-provider second). So
+  # populate_models.py splits each cluster into a baseline provider (2048) and a
+  # "-reasoning" provider (12288), each with its own max_tokens, and we leave this
+  # global key unset so those per-provider caps actually take effect on a /model
+  # switch. Both caps are env-tunable: ALCF_MAX_TOKENS / ALCF_REASONING_MAX_TOKENS.
 
   # The ALCF vLLM gateway rejects a `name` field on role:tool messages with
   # HTTP 422 (extra_forbidden), which breaks agentic tool use. This flag makes
@@ -101,39 +121,55 @@ dashboard:
 # discovery failure, so the live config always has a valid, useful block.
 #__ALCF_CUSTOM_PROVIDERS__  (entrypoint replaces from this line to EOF)
 custom_providers:
+  # NOTE: each cluster is split into a baseline provider (plain chat models,
+  # max_tokens 2048) and a "-reasoning" provider (reasoning models, max_tokens
+  # 12288). Reasoning models emit a hidden chain-of-thought that shares the output
+  # budget, so they need a larger cap. populate_models.py regenerates this at
+  # container start from the live catalog (detecting reasoning via the /models
+  # reasoning_parser field + an id heuristic); this static block is only a
+  # fallback if generation is skipped entirely.
   - name: alcf-sophia
     base_url: "https://inference-api.alcf.anl.gov/resource_server/sophia/vllm/v1"
     api_key: "${ALCF_ACCESS_TOKEN}"
     discover_models: false
+    max_tokens: 2048
     # NOTE: only models whose REAL ALCF serving window is >= 64000 tokens are
     # listed. Hermes refuses to load any model below its 64k MINIMUM_CONTEXT_LENGTH
     # floor, so a sub-floor model would be a broken dropdown entry. ALCF caps many
     # models (all Llama 3.x/4, Mixtral, Devstral, Mistral-Large-2407) at 16k-32k,
     # so they are intentionally absent here and from the generated live list.
     models:
+      argonne/AuroraGPT-IT-v4-0125:
+        context_length: 128000
+  - name: alcf-sophia-reasoning
+    base_url: "https://inference-api.alcf.anl.gov/resource_server/sophia/vllm/v1"
+    api_key: "${ALCF_ACCESS_TOKEN}"
+    discover_models: false
+    max_tokens: 12288
+    models:
+      arcee-ai/Trinity-Large-Thinking-W4A16:
+        context_length: 131072
+      google/gemma-4-26B-A4B-it:
+        context_length: 262144
+      google/gemma-4-31B-it:
+        context_length: 128000
+      nvidia/nemotron-3-super-120b:
+        context_length: 262144
       openai/gpt-oss-120b:
         context_length: 65536
       openai/gpt-oss-20b:
         context_length: 128000
-      google/gemma-4-31B-it:
-        context_length: 128000
-      google/gemma-4-26B-A4B-it:
-        context_length: 262144
-      arcee-ai/Trinity-Large-Thinking-W4A16:
-        context_length: 131072
-      nvidia/nemotron-3-super-120b:
-        context_length: 262144
-      argonne/AuroraGPT-IT-v4-0125:
-        context_length: 128000
-  - name: alcf-metis
+  - name: alcf-metis-reasoning
     base_url: "https://inference-api.alcf.anl.gov/resource_server/metis/api/v1"
     api_key: "${ALCF_ACCESS_TOKEN}"
     discover_models: false
+    max_tokens: 12288
     # Metis reports no server window; values are empirically verified. Only >=64k
     # models are listed — Mistral-Large-3 (Metis) serves at just 8192 and is
-    # excluded (Hermes would reject it).
+    # excluded (Hermes would reject it). Both current Metis models (gemma-4, gpt-oss)
+    # are reasoning models, so there is no baseline alcf-metis block in the fallback.
     models:
-      gpt-oss-120b:
-        context_length: 131072
       gemma-4-31B-it:
+        context_length: 131072
+      gpt-oss-120b:
         context_length: 131072

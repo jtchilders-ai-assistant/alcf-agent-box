@@ -86,6 +86,51 @@ DEFAULT_CONTEXT = 32768
 # the boundary, never that we ship an unusable entry (we err on excluding).
 MIN_CONTEXT = 64000
 
+# --- Per-model output cap (max_tokens) ---------------------------------------
+# ALCF serves several REASONING models whose hidden chain-of-thought is emitted
+# on a separate channel that DRAWS FROM THE SAME max_tokens budget as the visible
+# answer. With a small cap, the model can burn the whole budget thinking and
+# return empty content (finish_reason=length) — verified on gpt-oss at ALCF. So
+# reasoning models need a bigger output cap than plain chat models.
+#
+# Hermes has NO per-model max_tokens (unlike context_length): it honours a
+# per-PROVIDER max_tokens on a custom_providers entry (runtime_provider.py
+# _lift_max_output_tokens), applied only when the top-level model.max_tokens is
+# unset. So we express "per-model" caps by SPLITTING each cluster into two
+# provider blocks — a baseline block and a "-reasoning" block — each carrying its
+# own max_tokens. The launch model's cap is set separately by the entrypoint on
+# the top-level model: block (that model resolves through raw provider:custom,
+# not a named provider).
+#
+# Both caps are env-overridable (entrypoint passes them through):
+#   ALCF_MAX_TOKENS            baseline output cap  (default 2048)
+#   ALCF_REASONING_MAX_TOKENS  reasoning output cap (default 12288)
+BASELINE_MAX_TOKENS = int(os.environ.get("ALCF_MAX_TOKENS") or 2048)
+REASONING_MAX_TOKENS = int(os.environ.get("ALCF_REASONING_MAX_TOKENS") or 12288)
+
+# Reasoning detection is two-layered:
+#  (1) AUTHORITATIVE — the Sophia /models entry advertises a `reasoning_parser`
+#      (e.g. nemotron-3-super="super_v3"; gemma-4*="gemma4"). vLLM only sets this
+#      when the model is served with a reasoning parser, i.e. it emits a separate
+#      reasoning channel. This is captured per-model during selection.
+#  (2) ID HEURISTIC — some reasoning models are served WITHOUT a reasoning_parser
+#      field (gpt-oss uses the built-in Harmony format + the `openai` tool-call
+#      parser; Trinity-Large-Thinking exposes none). Catch these by id. Also the
+#      only signal we have on Metis (framework: api, no parser field at all).
+REASONING_ID_PATTERNS = (
+    re.compile(r"gpt-oss", re.IGNORECASE),
+    re.compile(r"gemma-4", re.IGNORECASE),  # gemma-4* served with reasoning_parser=gemma4 on Sophia; Metis omits the field
+    re.compile(r"thinking", re.IGNORECASE),
+    re.compile(r"reasoning", re.IGNORECASE),
+    re.compile(r"deepseek-?r1", re.IGNORECASE),
+    re.compile(r"\bqwq\b", re.IGNORECASE),
+    re.compile(r"(^|[/-])o[13]([-.]|$)", re.IGNORECASE),  # o1 / o3 families
+)
+
+
+def _is_reasoning_id(mid: str) -> bool:
+    return any(p.search(mid) for p in REASONING_ID_PATTERNS)
+
 # Sophia chat models that are real vLLM chat endpoints but report no
 # max_model_len from the server. Keep them (allowlist) with a sane window.
 SOPHIA_ALLOWLIST = {
@@ -119,21 +164,22 @@ NON_CHAT_ID_PATTERNS = (
 
 # --- Static fallbacks (used only when live discovery for a cluster fails) -----
 # Only models at/above MIN_CONTEXT (64k) belong here — a sub-floor model is a
-# broken entry Hermes will reject on load. Values reflect the real serving
-# windows verified live 2026-08-10.
+# broken entry Hermes will reject on load. Values are (context_length, is_reasoning),
+# reflecting the real serving windows + reasoning class verified live 2026-08-10.
 SOPHIA_FALLBACK = {
-    "openai/gpt-oss-120b": 65536,
-    "openai/gpt-oss-20b": 128000,
-    "google/gemma-4-31B-it": 128000,
-    "google/gemma-4-26B-A4B-it": 262144,
-    "arcee-ai/Trinity-Large-Thinking-W4A16": 131072,
-    "nvidia/nemotron-3-super-120b": 262144,
-    "argonne/AuroraGPT-IT-v4-0125": 128000,
+    "openai/gpt-oss-120b": (65536, True),
+    "openai/gpt-oss-20b": (128000, True),
+    "google/gemma-4-31B-it": (128000, True),
+    "google/gemma-4-26B-A4B-it": (262144, True),
+    "arcee-ai/Trinity-Large-Thinking-W4A16": (131072, True),
+    "nvidia/nemotron-3-super-120b": (262144, True),
+    "argonne/AuroraGPT-IT-v4-0125": (128000, False),
 }
 # Metis fallback: only the Metis models at/above the floor. Mistral-Large-3
 # serves at 8192 (verified) so it is intentionally NOT here — it's unusable.
 METIS_FALLBACK = {
-    mid: ctx for mid, ctx in METIS_CONTEXT.items() if ctx >= MIN_CONTEXT
+    mid: (ctx, _is_reasoning_id(mid))
+    for mid, ctx in METIS_CONTEXT.items() if ctx >= MIN_CONTEXT
 }
 
 
@@ -160,10 +206,12 @@ def _is_non_chat_id(mid: str) -> bool:
 
 
 def _select_sophia(models: list) -> dict:
-    """{model_id: context_length} for Sophia chat models, filtered + allowlisted.
+    """{model_id: (context_length, is_reasoning)} for Sophia chat models.
 
     Excludes non-chat frameworks, embedding/science ids, AND any model whose real
     serving window is below Hermes' MIN_CONTEXT floor (an unusable dropdown entry).
+    is_reasoning is True when the server advertises a `reasoning_parser` OR the id
+    matches a known reasoning family (see _is_reasoning_id).
     """
     out = {}
     for m in models:
@@ -187,16 +235,18 @@ def _select_sophia(models: list) -> dict:
             print(f"[populate_models] sophia: skip {mid} (window {ctx} < {MIN_CONTEXT})",
                   file=sys.stderr)
             continue
-        out[mid] = ctx
+        is_reasoning = bool(m.get("reasoning_parser")) or _is_reasoning_id(mid)
+        out[mid] = (ctx, is_reasoning)
     return out
 
 
 def _select_metis(models: list) -> dict:
-    """{model_id: context_length} for Metis models (all chat; no server window).
+    """{model_id: (context_length, is_reasoning)} for Metis models (all chat).
 
     Metis reports no max_model_len, so context comes from METIS_CONTEXT (verified)
     or METIS_DEFAULT_CONTEXT. Any model below Hermes' MIN_CONTEXT floor is excluded
-    (e.g. Mistral-Large-3 serves at only 8192 — unusable in Hermes).
+    (e.g. Mistral-Large-3 serves at only 8192 — unusable in Hermes). Metis exposes
+    no reasoning_parser field, so reasoning is detected by id heuristic only.
     """
     out = {}
     for m in models:
@@ -213,7 +263,7 @@ def _select_metis(models: list) -> dict:
             print(f"[populate_models] metis: skip {mid} (window {ctx} < {MIN_CONTEXT})",
                   file=sys.stderr)
             continue
-        out[mid] = ctx
+        out[mid] = (ctx, _is_reasoning_id(mid))
     return out
 
 
@@ -232,18 +282,55 @@ def _resolve_cluster(cluster: str, token: str, selector, fallback: dict) -> tupl
     return dict(fallback), "fallback"
 
 
-def _emit_provider(name: str, base_url: str, mapping: dict) -> list:
-    """Render one custom_providers entry (2-space list-item indent)."""
+def _emit_provider(name: str, base_url: str, mapping: dict,
+                   max_tokens: int = 0) -> list:
+    """Render one custom_providers entry (2-space list-item indent).
+
+    ``mapping`` is {model_id: (context_length, is_reasoning)}; only context_length
+    is emitted per model (Hermes has no per-model max_tokens). ``max_tokens`` > 0
+    emits a PROVIDER-level output cap that Hermes lifts onto AIAgent.max_tokens
+    for any model selected under this provider (when top-level model.max_tokens is
+    unset) — this is how we give reasoning vs non-reasoning models different caps.
+    """
     lines = [
         f"  - name: {name}",
         f'    base_url: "{base_url}"',
         '    api_key: "${ALCF_ACCESS_TOKEN}"',
         "    discover_models: false",
-        "    models:",
     ]
+    if max_tokens and max_tokens > 0:
+        lines.append(f"    max_tokens: {max_tokens}")
+    lines.append("    models:")
     for mid in sorted(mapping):
+        ctx = mapping[mid][0]
         lines.append(f"      {mid}:")
-        lines.append(f"        context_length: {mapping[mid]}")
+        lines.append(f"        context_length: {ctx}")
+    return lines
+
+
+def _split_reasoning(mapping: dict) -> tuple:
+    """Split {id:(ctx,is_reasoning)} into (baseline_map, reasoning_map)."""
+    baseline = {mid: v for mid, v in mapping.items() if not v[1]}
+    reasoning = {mid: v for mid, v in mapping.items() if v[1]}
+    return baseline, reasoning
+
+
+def _emit_cluster(name: str, base_url: str, mapping: dict) -> list:
+    """Emit one or two provider blocks for a cluster, split by reasoning class.
+
+    Non-reasoning models go in ``<name>`` with the baseline output cap; reasoning
+    models go in ``<name>-reasoning`` with the larger reasoning cap. A block is
+    omitted entirely if its bucket is empty, so a cluster with only one class
+    yields a single provider (no empty "-reasoning" entry cluttering the picker).
+    """
+    baseline, reasoning = _split_reasoning(mapping)
+    lines = []
+    if baseline:
+        lines += _emit_provider(name, base_url, baseline,
+                                max_tokens=BASELINE_MAX_TOKENS)
+    if reasoning:
+        lines += _emit_provider(f"{name}-reasoning", base_url, reasoning,
+                                max_tokens=REASONING_MAX_TOKENS)
     return lines
 
 
@@ -262,7 +349,7 @@ def build_block(include_metis: bool = True) -> str:
         sophia_map, sophia_src = dict(SOPHIA_FALLBACK), "fallback"
 
     lines = ["custom_providers:"]
-    lines += _emit_provider("alcf-sophia", SOPHIA_BASE, sophia_map)
+    lines += _emit_cluster("alcf-sophia", SOPHIA_BASE, sophia_map)
     print(f"[populate_models] sophia: {len(sophia_map)} models ({sophia_src})",
           file=sys.stderr)
 
@@ -272,7 +359,7 @@ def build_block(include_metis: bool = True) -> str:
                 "metis", token, _select_metis, METIS_FALLBACK)
         else:
             metis_map, metis_src = dict(METIS_FALLBACK), "fallback"
-        lines += _emit_provider("alcf-metis", METIS_BASE, metis_map)
+        lines += _emit_cluster("alcf-metis", METIS_BASE, metis_map)
         print(f"[populate_models] metis: {len(metis_map)} models ({metis_src})",
               file=sys.stderr)
 
@@ -351,6 +438,41 @@ def hot_report() -> int:
     return 0
 
 
+def launch_provider(model_id: str) -> str:
+    """Return the named custom provider the LAUNCH model should resolve through.
+
+    The top-level model: block in config resolves through a NAMED custom provider
+    so the launch turn inherits that provider's per-model output cap. This returns
+    e.g. 'custom:alcf-sophia-reasoning' or 'custom:alcf-metis'. The cluster is read
+    from ALCF_BASE_URL (the launch model always uses that endpoint); the reasoning
+    class is taken from the live catalog's reasoning_parser when reachable, else
+    the id heuristic (so this is robust offline / on discovery failure).
+
+    Never raises — on any doubt it returns the reasoning provider, because giving a
+    plain chat model extra output headroom is harmless, while starving a reasoning
+    model of headroom produces empty responses.
+    """
+    base = os.environ.get("ALCF_BASE_URL", "") or SOPHIA_BASE
+    cluster = "alcf-metis" if "/metis/" in base else "alcf-sophia"
+
+    is_reasoning = _is_reasoning_id(model_id)
+    if not is_reasoning:
+        # Consult the live catalog for an authoritative reasoning_parser signal;
+        # only the Sophia catalog carries it. Best-effort, never fatal.
+        try:
+            token = _get_token()
+            cl = "metis" if cluster == "alcf-metis" else "sophia"
+            for m in _fetch_models(cl, token):
+                if m.get("id") == model_id and m.get("reasoning_parser"):
+                    is_reasoning = True
+                    break
+        except Exception:  # noqa: BLE001
+            pass
+
+    name = f"{cluster}-reasoning" if is_reasoning else cluster
+    return f"custom:{name}"
+
+
 def main() -> int:
     import argparse
     ap = argparse.ArgumentParser()
@@ -360,7 +482,15 @@ def main() -> int:
     ap.add_argument("--hot-report", action="store_true",
                     help="print a hot/cold warm-up status banner instead of the "
                          "custom_providers block (queries /jobs)")
+    ap.add_argument("--launch-provider", default="", metavar="MODEL_ID",
+                    help="print the named custom provider the given launch model "
+                         "should resolve through (e.g. custom:alcf-sophia-reasoning) "
+                         "and exit")
     args = ap.parse_args()
+
+    if args.launch_provider:
+        sys.stdout.write(launch_provider(args.launch_provider) + "\n")
+        return 0
 
     if args.hot_report:
         return hot_report()

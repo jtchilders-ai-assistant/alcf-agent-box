@@ -137,6 +137,8 @@ render_config() {
   # never fatal. ALCF_ENABLE_METIS=0 drops the Metis provider.
   providers_block="$(ALCF_INFER_AUTH="$INFER_AUTH" ALCF_PY="$PY" \
             ALCF_ENABLE_METIS="${ALCF_ENABLE_METIS:-1}" \
+            ALCF_MAX_TOKENS="${ALCF_MAX_TOKENS:-2048}" \
+            ALCF_REASONING_MAX_TOKENS="${ALCF_REASONING_MAX_TOKENS:-12288}" \
             "$PY" "$ALCF_DIR/populate_models.py" 2>>/tmp/populate_models.log)"
   # Guard: a generated block MUST start with 'custom_providers:'. If somehow it
   # didn't (script crashed hard), leave $providers_block empty so the splice step
@@ -195,12 +197,54 @@ render_config() {
   fi
   # --- end launch-model context floor guard --------------------------------
 
+  # --- Resolve the launch model's named provider (per-model output cap) -----
+  # The top-level model: block resolves through a NAMED custom provider so the
+  # LAUNCH turn inherits that provider's max_tokens (reasoning models get 12288,
+  # plain chat 2048). Hermes has no top-level per-model max_tokens, so this is how
+  # turn-one gets the right cap; /model switches on the dashboard then resolve the
+  # cap per-provider on their own.
+  #
+  # Derive the provider from the SAME block that will be written (single source of
+  # truth): find which `- name: alcf-*` section lists the launch model id, so a
+  # model the live catalog classified as reasoning (e.g. nemotron via its
+  # reasoning_parser) lands in the -reasoning provider even though its id has no
+  # reasoning keyword. Falls back to the id-heuristic Python resolver if the scan
+  # finds nothing (e.g. block unreadable), and finally to custom:alcf-sophia.
+  local launch_provider block_for_scan
+  # Scan the generated block if we have one; else the template's static fallback.
+  if [ -n "$providers_block" ]; then
+    block_for_scan="$providers_block"
+  else
+    block_for_scan="$(cat "$ALCF_DIR/config.template.yaml" 2>/dev/null || true)"
+  fi
+  launch_provider="$(printf '%s\n' "$block_for_scan" | awk -v m="$launch_model" '
+    /^  - name: / { prov = $3; next }
+    $0 ~ "^      " m ":$" { print prov; exit }
+  ')"
+  if [ -z "$launch_provider" ]; then
+    # Fallback: ask the Python resolver (id heuristic + best-effort catalog).
+    launch_provider="$(ALCF_INFER_AUTH="$INFER_AUTH" ALCF_PY="$PY" \
+        ALCF_BASE_URL="$ALCF_BASE_URL" \
+        "$PY" "$ALCF_DIR/populate_models.py" --launch-provider "$launch_model" \
+        2>>/tmp/populate_models.log || true)"
+    # awk printed a bare provider name (alcf-sophia-reasoning); the Python path
+    # already prints the custom: prefix. Normalise: prefix bare names.
+    case "$launch_provider" in custom:*) : ;; ?*) launch_provider="custom:$launch_provider" ;; esac
+  else
+    launch_provider="custom:$launch_provider"
+  fi
+  # Last-resort default so the config always has a valid provider.
+  [ -n "$launch_provider" ] || launch_provider="custom:alcf-sophia"
+  log "Launch model '$launch_model' -> provider $launch_provider (per-model output cap)"
+  # --- end launch-model provider resolution --------------------------------
+
   # Render: substitute ${...} placeholders, and splice the generated providers
   # block over the sentinel-to-EOF region of the template. The generated block
   # still contains ${ALCF_ACCESS_TOKEN}, so we splice FIRST then substitute.
   ALCF_ACCESS_TOKEN="$token" \
   ALCF_BASE_URL="$ALCF_BASE_URL" \
   ALCF_MODEL="${ALCF_MODEL:-google/gemma-4-31B-it}" \
+  ALCF_LAUNCH_PROVIDER="$launch_provider" \
   ALCF_MAX_TOKENS="${ALCF_MAX_TOKENS:-2048}" \
   ALCF_CONTEXT_LENGTH="$ctxlen" \
   ALCF_DASHBOARD_USER="$ALCF_DASHBOARD_USER" \
