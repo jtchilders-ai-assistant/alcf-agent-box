@@ -115,8 +115,9 @@ Then ask the agent to read/write under `/work`. Only that directory is exposed.
 | ALCF skills | `skills/` | How to call ALCF inference / IRI / PBS |
 | Knowledge seed | `memory/MEMORY.md` | Curated, **sanitized** ALCF facts (always injected) |
 | Docs snapshot | `docs/` | Latest ALCF user docs (refreshed nightly) |
-| Config template | `config/config.template.yaml` | Points Hermes at ALCF inference |
-| Entrypoint | `scripts/entrypoint.sh` | First-run auth + token refresh + launch |
+| Config template | `config/config.template.yaml` | Points Hermes at ALCF inference; carries the static model-list fallback |
+| Model-list generator | `scripts/populate_models.py` | Builds the switchable model list from the live ALCF catalog at start (reasoning split, 64k floor, hot/cold report) |
+| Entrypoint | `scripts/entrypoint.sh` | First-run auth, config render, dynamic model list, launch-provider + context-floor guard, token-refresh loop, launch |
 
 ### Architecture: built on the official Hermes image
 
@@ -154,6 +155,59 @@ running config at container start. Environment variables you can override at
 | `ALCF_DASHBOARD_USER` | `alcf` | Dashboard login username |
 | `ALCF_DASHBOARD_PASSWORD` | *(auto-generated + printed)* | Dashboard login password (hashed at start; plaintext never stored) |
 | `ALCF_ENABLE_IRI` | `1` | Prompt for the second (IRI) Globus login |
+| `ALCF_ENABLE_METIS` | `1` | Include the Metis cluster's models in the switchable list |
+| `ALCF_SHOW_MODEL_STATUS` | `1` | Print the hot/cold model warm-up banner at startup |
+
+## What happens at container start
+
+`scripts/entrypoint.sh` is the launch script. On every start (not just the first
+run) it performs the following steps before handing off to the Hermes dashboard.
+All of the ALCF-service calls below are **best-effort and non-fatal** — if the
+network or catalog is unavailable, each step falls back to a safe default rather
+than aborting the launch.
+
+1. **Globus authentication.** On first run, prompts for the **Inference Service**
+   login (and, unless `ALCF_ENABLE_IRI=0`, the separate **IRI Facility API**
+   login). Tokens are stored in the `/opt/data` volume; later starts reuse them.
+2. **Dashboard auth gate.** Hashes the dashboard password (from
+   `ALCF_DASHBOARD_PASSWORD`, or an auto-generated one printed once). Hermes
+   refuses a non-loopback bind without this gate.
+3. **Config render** (`render_config`), which builds the running config from
+   `config/config.template.yaml`:
+   - **Fetch a fresh inference token** — it's the `api_key`, and it rotates.
+   - **Resolve the launch model's real context window**
+     (`resolve_context_length.py`) from the gateway's `max_model_len`, because
+     ALCF caps some models below their published spec and Hermes must be told the
+     true window. Falls back to 128000 on any lookup failure.
+   - **Generate the switchable model list** (`populate_models.py`) from the live
+     catalog on both clusters: filter to chat models, drop anything below the 64k
+     context floor, split each cluster into baseline vs. `-reasoning` providers,
+     and stamp each provider's per-response output cap (`ALCF_MAX_TOKENS` /
+     `ALCF_REASONING_MAX_TOKENS`). On discovery failure it emits the committed
+     static fallback block instead. (See **Switching models** above.)
+   - **Context-floor guard.** If the *launch* model's real window is under 64k,
+     refuse to start (exit 78) with an actionable list of valid ≥64k models,
+     instead of letting Hermes throw a raw stacktrace at load.
+   - **Launch-provider resolution.** Find which generated provider lists the
+     launch model and point the top-level `model:` block at it
+     (`custom:alcf-sophia`, `custom:alcf-sophia-reasoning`, …), so the very first
+     turn inherits the correct per-model output cap.
+   - **Splice + substitute** the providers block into the template and write the
+     final config.
+4. **Hot/cold warm-up banner** (`populate_models.py --hot-report`, unless
+   `ALCF_SHOW_MODEL_STATUS=0`): prints which offered models are loaded on GPU
+   *now* vs. which will cold-start (~10–15 min, HTTP 503 until ready).
+5. **Seed / refresh skills, memory, and SOUL.** ALCF skills, `MEMORY.md`, and the
+   agent's `SOUL.md` identity are image-managed: refreshed from the image on each
+   start **only if you haven't edited your copy** (tracked by checksum stamps), so
+   knowledge-base fixes reach existing volumes without clobbering user edits. A
+   stock/legacy Hermes `SOUL.md` with no ALCF stamp is replaced so the ALCF
+   identity always lands.
+6. **Token-refresh loop + launch.** A background loop re-renders the config with a
+   fresh inference token every 6h (tokens last 48h; a full re-auth is required
+   every 30 days). If a refresh fails — usually the 30-day limit — it logs a loud
+   banner and drops a status file the agent surfaces *in chat*. Then the Hermes
+   dashboard starts behind the Caddy HTTPS proxy.
 
 ## Memory & documentation
 
@@ -183,28 +237,61 @@ provider (`hermes memory setup`) and ingest `docs/` into it.
 
 ## Switching models
 
-The ALCF Inference Service serves 40+ models, but its gateway doesn't expose the
-standard OpenAI `/v1/models` path, so the image ships a **curated switchable
-list** (in `config/config.template.yaml` under `custom_providers`). In the web
-chat, click the **MODEL** selector → **alcf-inference** and pick one:
+The ALCF Inference Service serves 40+ models across two clusters (**Sophia**,
+vLLM; **Metis**, SambaNova), but its gateway doesn't expose the standard OpenAI
+`/v1/models` discovery path in the place Hermes expects. So instead of shipping a
+hand-maintained list, the container **generates the switchable model list at
+startup** from the live ALCF catalog (`scripts/populate_models.py`) and writes it
+into the running config. This means the dropdown tracks what ALCF actually serves,
+without a rebuild.
 
-- `google/gemma-4-31B-it` (default) — non-reasoning, kept consistently hot
-- `openai/gpt-oss-120b`, `openai/gpt-oss-20b` — reasoning models
-- `meta-llama/Llama-3.3-70B-Instruct`, `Meta-Llama-3.1-8B-Instruct`,
-  `Llama-4-Maverick-…`, `Llama-4-Scout-…`
-- `mistralai/Mixtral-8x22B-…`,
-  `mistralai/Mistral-Large-…`, `nvidia/nemotron-3-super-120b`
-- `argonne/AuroraGPT-IT-v4-0125` (Argonne's own model)
+In the web chat, click the **MODEL** selector and pick a provider + model. The
+providers are named by cluster and reasoning class:
 
-All share the same endpoint + Globus token, so switching is instant (a cold
-model may take 10-15 min to load on its first request). The **gpt-oss** models
-are *reasoning* models (hidden reasoning consumes the token budget); the
-non-reasoning models feel snappier for plain chat.
+- **`alcf-sophia`** — Sophia plain-chat models (e.g. `argonne/AuroraGPT-IT-v4-0125`)
+- **`alcf-sophia-reasoning`** — Sophia reasoning models (`google/gemma-4-31B-it`
+  (default), `openai/gpt-oss-120b`, `openai/gpt-oss-20b`,
+  `nvidia/nemotron-3-super-120b`, `arcee-ai/Trinity-Large-Thinking-…`)
+- **`alcf-metis`** / **`alcf-metis-reasoning`** — the Metis equivalents (drop the
+  Metis providers with `-e ALCF_ENABLE_METIS=0`)
 
-For the **full live catalog** (embeddings, GenSLM science models, everything),
-just ask the agent: *"what models are available on ALCF inference?"* — it queries
-the service directly via its `alcf-inference-service` skill. To add more to the
-dropdown, edit the `models:` list in the config template and rebuild.
+Three behaviors are worth knowing:
+
+1. **64k context floor.** Hermes refuses to load any model whose *real* serving
+   window is below 64,000 tokens. ALCF caps many models well under that (all
+   Llama 3.x/4, Mixtral, Devstral, Mistral-Large-2407 serve at 16k–32k), so those
+   are **intentionally excluded** from the list — they would be broken dropdown
+   entries. The generator reads each model's true `max_model_len` from the gateway
+   rather than trusting the published spec.
+
+2. **Reasoning vs. plain chat is a separate provider, with a bigger output cap.**
+   Reasoning models (gpt-oss, gemma-4, nemotron-3-super, `*-Thinking`) spend part
+   of the `max_tokens` output budget on a hidden reasoning channel, so a small cap
+   can leave them returning empty responses. The generator detects reasoning
+   models (via the gateway's `reasoning_parser` field, plus an id heuristic for
+   models served without it) and puts them in the `-reasoning` provider with a
+   larger per-response cap — `ALCF_REASONING_MAX_TOKENS` (default **12288**) vs.
+   `ALCF_MAX_TOKENS` (default **2048**) for plain chat. The launch model is
+   automatically pointed at whichever provider matches its class, so the first
+   turn already gets the right cap.
+
+3. **Hot vs. cold (the HTTP 503 you might see).** All models share the same
+   endpoint + Globus token, so *switching* is instant — but ALCF only keeps a
+   subset loaded on GPU at any moment. Selecting a **cold** model triggers a
+   ~10–15 min load and returns `HTTP 503 "online but not ready"` until it warms
+   up. That looks like a failure but isn't. At startup the container prints a
+   **hot/cold banner** (`populate_models.py --hot-report`) showing which offered
+   models are hot *right now*, so you can pick an instant one or know to wait.
+   Suppress it with `-e ALCF_SHOW_MODEL_STATUS=0`.
+
+If the live catalog is unreachable at startup, the generator falls back to a
+committed static list in `config/config.template.yaml`, so the container always
+comes up with a usable (if possibly slightly stale) set of models.
+
+For the **full live catalog** (embeddings, GenSLM science models, everything —
+including the sub-64k models that can't be the agent's brain), just ask the
+agent: *"what models are available on ALCF inference?"* — it queries the service
+directly via its `alcf-inference-service` skill.
 
 ---
 

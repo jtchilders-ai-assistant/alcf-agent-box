@@ -71,10 +71,64 @@ Consequences baked into the design:
   Hermes config with a fresh inference access token, because the token is the
   `api_key` and it rotates.
 
+## Startup pipeline (what the launch scripts do)
+
+`scripts/entrypoint.sh` runs on every container start and renders the live config
+before launching the dashboard. The design principle throughout is **fail-open**:
+every ALCF-service call is best-effort and falls back to a safe default rather
+than aborting the launch, and the one intentional hard stop (the context-floor
+guard) only fires on a positive, confirmed sub-floor reading.
+
+Order of operations in `render_config()` (re-run by the 6h token-refresh loop):
+
+1. **Fresh inference token.** The token is the `api_key` and rotates, so it's
+   re-fetched on every render.
+2. **Launch-model context window** (`resolve_context_length.py`). Reads the real
+   `max_model_len` from the gateway because ALCF caps some models below their
+   published spec and Hermes' family table would otherwise over-estimate it.
+   Defaults to 128000 on any failure (so the floor guard fails open).
+3. **Model-list generation** (`populate_models.py`). Queries the live catalog on
+   both clusters, filters to chat models with a real ≥64k window, and emits a
+   `custom_providers:` block. Each cluster is split into a baseline provider and a
+   `-reasoning` provider (see quirk #1), each carrying its own `max_tokens`.
+   Reasoning classification uses the catalog `reasoning_parser` field plus an id
+   heuristic. On any discovery failure it prints the committed static fallback
+   block from the template, so the container always comes up with a usable list.
+4. **Context-floor guard.** Hermes hard-refuses a model whose window is below
+   `MINIMUM_CONTEXT_LENGTH` (64000). If the *launch* model is sub-floor, exit 78
+   with an actionable list of valid models rather than a raw Hermes stacktrace.
+5. **Launch-provider resolution.** Scan the *generated block* (single source of
+   truth) for which provider lists the launch model, and set the top-level
+   `model.provider` to that named provider (`custom:alcf-sophia[-reasoning]`).
+   This is how turn one inherits the correct per-model output cap given that
+   Hermes has no top-level per-model `max_tokens`. Falls back to the Python
+   `--launch-provider` id heuristic, then to `custom:alcf-sophia`.
+6. **Splice + substitute.** The generated block replaces the sentinel-to-EOF
+   region of `config.template.yaml`, then `${VAR}` placeholders are substituted.
+
+After the render, a **hot/cold warm-up banner** (`--hot-report`, gated by
+`ALCF_SHOW_MODEL_STATUS`) reports which offered models are loaded on GPU now vs.
+which will cold-start (~10–15 min, HTTP 503 until ready). Then skills / `MEMORY.md`
+/ `SOUL.md` are seeded-or-refreshed (checksum-stamped so user edits are never
+clobbered), the 6h refresh loop starts, and the dashboard launches behind Caddy.
+
 ## Two provider quirks (both handled)
 
-1. **Reasoning models return empty content with a small output cap.** `gpt-oss-*`
-   spend `max_tokens` on a hidden reasoning channel. Fix: `model.max_tokens: 2048`.
+1. **Reasoning models return empty content with a small output cap.** Reasoning
+   models (`gpt-oss-*`, `gemma-4-*`, `nemotron-3-super`, `*-Thinking`) spend part
+   of the `max_tokens` output budget on a hidden reasoning channel, so a small cap
+   can leave them returning empty content (`finish_reason=length`). Hermes has no
+   *per-model* `max_tokens` (unlike `context_length`) — it honours a per-*provider*
+   `max_tokens`, and only when the top-level `model.max_tokens` is unset. Fix
+   (`populate_models.py`): split each cluster into a baseline provider
+   (`alcf-sophia`, `max_tokens` 2048) and a `-reasoning` provider
+   (`alcf-sophia-reasoning`, `max_tokens` 12288, env-overridable via
+   `ALCF_MAX_TOKENS` / `ALCF_REASONING_MAX_TOKENS`); leave top-level
+   `model.max_tokens` unset so `/model` switches resolve the right cap per request;
+   and point the launch model's top-level `model.provider` at whichever named
+   provider matches its class so turn one gets the right cap too. Reasoning is
+   detected from the gateway's `reasoning_parser` field, with an id heuristic for
+   models served without it (e.g. gpt-oss).
 2. **The vLLM gateway rejects `name` on `role: tool` messages** with HTTP 422
    `extra_forbidden`, breaking all agentic tool use. `name` is a *valid* Chat
    Completions field that compliant providers accept, so we can't strip it
@@ -105,7 +159,9 @@ All proven with real execution, not description:
 Dockerfile                         patched-Hermes install + content, layered
 config/config.template.yaml        single ALCF inference target + both fixes
 config/SOUL.md                     agent identity + "what can I do" greeting (seeded to $HERMES_HOME/SOUL.md)
-scripts/entrypoint.sh              first-run auth, config render, refresh loop, launch
+scripts/entrypoint.sh              first-run auth, config render + dynamic model list, floor/launch-provider guards, refresh loop, launch
+scripts/populate_models.py         generates the switchable model list from the live ALCF catalog (reasoning split, 64k floor, --hot-report, --launch-provider)
+scripts/resolve_context_length.py  resolves a model's real serving window (max_model_len) for the context-floor guard
 scripts/fetch_docs.py              pulls ALCF user-guides markdown into docs/
 scripts/inference_auth_token.py    vendored Globus helper (inference)
 scripts/alcf_facility_api_globus_token.py  vendored Globus helper (IRI)

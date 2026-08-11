@@ -99,10 +99,15 @@ With too small a cap the model spends the whole budget on reasoning and returns
 `content: null`, `finish_reason: "length"`. Observed: `max_tokens=80` -> empty content;
 `max_tokens=400` -> `content` present, `finish_reason: "stop"`.
 
-**Implication for Hermes / any OpenAI client:** set a GENEROUS output cap when the backend
-is an ALCF gpt-oss model, or you get blank replies. Non-reasoning models (Gemma, Llama)
-don't have this. Note Hermes strips `max_tokens` for OpenAI-compat providers — pass it via
-`extra_body` if you hit empty responses (same class of issue as the Argo vision/max_tokens quirk).
+**Implication for Hermes / any OpenAI client:** set a GENEROUS output cap for reasoning
+models or you get blank replies. Reasoning models on ALCF include the gpt-oss family,
+the **gemma-4 family** (they carry a `reasoning_parser` in the catalog), nemotron-3-super,
+and the `*-Thinking` models; plain-chat models (AuroraGPT, Llama) don't need the extra
+headroom. In Hermes, express this with a **per-provider** `max_tokens` on the
+`custom_providers` entry (there is no top-level per-model `max_tokens`): put reasoning
+models in a provider block with a larger cap. The `alcf-agent-box` container does exactly
+this — it splits each cluster into a baseline provider (`max_tokens` 2048) and a
+`-reasoning` provider (`max_tokens` 12288); see its `scripts/populate_models.py`.
 
 ## Using it as a Hermes backend
 
