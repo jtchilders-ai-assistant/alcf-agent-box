@@ -2,8 +2,10 @@
 # ALCF Agent container entrypoint (Option A: on top of nousresearch/hermes-agent).
 #
 #   1. Resolve the ALCF inference base_url from ALCF_CLUSTER.
-#   2. First-run: authenticate to the ALCF Inference Service (Globus).
-#      Optional: authenticate to the IRI Facility API (a SEPARATE Globus login).
+#   2. First-run: ONE combined Globus login authenticates ALL enabled ALCF
+#      services at once (Inference always; IRI unless ALCF_ENABLE_IRI=0; Globus
+#      Compute unless ALCF_ENABLE_GLOBUS_COMPUTE=0) — a single browser visit and
+#      a single pasted code (see alcf_combined_auth.py).
 #   3. Render the Hermes config with a fresh inference access token (Python, so
 #      no envsubst dependency).
 #   4. Seed skills + curated MEMORY.md into $HERMES_HOME (idempotent).
@@ -17,6 +19,7 @@ set -euo pipefail
 ALCF_DIR=/opt/alcf
 INFER_AUTH="$ALCF_DIR/inference_auth_token.py"
 IRI_AUTH="$ALCF_DIR/alcf_facility_api_globus_token.py"
+COMBINED_AUTH="$ALCF_DIR/alcf_combined_auth.py"
 PY=/opt/hermes/.venv/bin/python
 HERMES_HOME="${HERMES_HOME:-/opt/data}"
 CONFIG_OUT="$HERMES_HOME/config.yaml"
@@ -55,50 +58,34 @@ export ALCF_BASE_URL
 mkdir -p "$HERMES_HOME"
 
 # --- 2. First-run Globus auth (interactive, idempotent) ---------------------
-authed_inference() { "$PY" "$INFER_AUTH" get_access_token >/dev/null 2>&1; }
+# ONE combined Globus login now covers ALL enabled ALCF services in a single
+# browser visit + single pasted code:
+#   * ALCF Inference Service (always; the token IS the LLM api_key)
+#   * IRI Facility API        (unless ALCF_ENABLE_IRI=0)
+#   * Globus Compute          (unless ALCF_ENABLE_GLOBUS_COMPUTE=0)
+# alcf_combined_auth.py requests all enabled scopes + BOTH required ALCF identity
+# policies in one consent, and is the single source of every service's tokens
+# (refresh tokens are client-bound, so one app must own them all). This replaces
+# the previous three separate logins.
+authed_inference() { "$PY" "$COMBINED_AUTH" get_access_token --service inference >/dev/null 2>&1; }
 
 if ! authed_inference; then
-  log "First-time setup: authenticate to the ALCF Inference Service."
-  log "A URL will be printed — open it, log in with your ALCF/Globus account,"
-  log "then paste the authorization code back here."
+  _svcs="Inference Service"
+  [[ "${ALCF_ENABLE_IRI:-1}" != "0" ]] && _svcs="$_svcs + IRI Facility API"
+  [[ "${ALCF_ENABLE_GLOBUS_COMPUTE:-1}" != "0" ]] && _svcs="$_svcs + Globus Compute"
+  log "First-time setup: ONE Globus login for: $_svcs"
+  log "A single URL will be printed — open it, log in with your ALCF/Globus"
+  log "account, and paste the ONE authorization code back here."
+  log "(Disable IRI with -e ALCF_ENABLE_IRI=0, Globus Compute with"
+  log " -e ALCF_ENABLE_GLOBUS_COMPUTE=0, before this login.)"
   echo
-  "$PY" "$INFER_AUTH" authenticate
+  "$PY" "$COMBINED_AUTH" authenticate
   echo
   if ! authed_inference; then
-    err "Inference authentication failed. Re-run the container to try again."
+    err "ALCF authentication failed. Re-run the container to try again."
     exit 1
   fi
-  log "ALCF Inference Service authentication OK."
-fi
-
-# Optional: IRI Facility API auth (job submission / filesystem ops).
-if [[ "${ALCF_ENABLE_IRI:-1}" == "1" ]]; then
-  if ! "$PY" "$IRI_AUTH" get_access_token >/dev/null 2>&1; then
-    log "Optional: authenticate to the IRI Facility API for job submission."
-    log "This is a SEPARATE Globus login. Press Ctrl-C to skip if you only"
-    log "want inference/chat."
-    echo
-    "$PY" "$IRI_AUTH" authenticate || log "IRI auth skipped/failed — chat still works."
-    echo
-  fi
-fi
-
-# Optional: Globus Compute auth (remote-bash: build/run software on ALCF compute
-# nodes). This is a THIRD, separate Globus login. ON by default (consistent with
-# IRI); it runs code under the user's allocation, so it can be hard-disabled with
-# ALCF_ENABLE_GLOBUS_COMPUTE=0. Destructive commands still require --yes at run time.
-REMOTE_BASH="$ALCF_DIR/alcf_remote_bash.py"
-if [[ "${ALCF_ENABLE_GLOBUS_COMPUTE:-1}" == "1" ]]; then
-  # `check` exits 0 only when enabled AND a Globus Compute login exists; when we
-  # are here (enabled) a non-zero exit means the login is missing -> prompt.
-  if ! "$PY" "$REMOTE_BASH" check >/dev/null 2>&1; then
-    log "Optional: authenticate to Globus Compute (lets the agent build/run"
-    log "software on ALCF compute nodes). This is a SEPARATE (third) Globus login."
-    log "Press Ctrl-C to skip if you only want inference/chat + IRI."
-    echo
-    "$PY" "$REMOTE_BASH" authenticate || log "Globus Compute auth skipped/failed — remote-bash unavailable until you run it."
-    echo
-  fi
+  log "ALCF authentication OK (single login covered all enabled services)."
 fi
 
 # --- 3. Dashboard auth (required for a container 0.0.0.0 bind) ---------------
@@ -369,7 +356,7 @@ cp -r "$ALCF_DIR/skills/." "$HERMES_HOME/skills/research/" 2>/dev/null || true
 TOKEN_STATUS="$HERMES_HOME/.inference_token_status"
 : > "$TOKEN_STATUS" 2>/dev/null || true   # start clean (empty = healthy)
 reauth_cmd="docker exec -it <container> \\
-  /opt/hermes/.venv/bin/python /opt/alcf/inference_auth_token.py authenticate"
+  /opt/hermes/.venv/bin/python /opt/alcf/alcf_combined_auth.py authenticate"
 (
   while true; do
     sleep 21600

@@ -59,6 +59,35 @@ import re
 import sys
 import time
 
+# The agent-in-a-box uses ONE combined Globus consent for all ALCF services
+# (see alcf_combined_auth.py). Prefer driving Globus Compute from that shared
+# consent so the user does not need a SEPARATE Globus Compute login. If the
+# combined module or its tokens are unavailable (e.g. running this script
+# standalone outside the box), we fall back to the SDK's own login flow.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    import alcf_combined_auth as _combined  # noqa: E402
+except Exception:  # pragma: no cover - standalone fallback
+    _combined = None
+
+
+def _make_compute_client():
+    """Return a globus_compute_sdk.Client bound to the COMBINED consent, or None
+    to let the SDK use its own login. Uses Client(app=<combined UserApp>) — the
+    modern, supported way to hand the compute SDK an existing GlobusApp so it
+    reuses our token instead of triggering a separate browser login."""
+    if _combined is None or not _combined.compute_enabled():
+        return None
+    if not _combined.has_tokens():
+        return None
+    try:
+        from globus_compute_sdk import Client
+        app = _combined.build_user_app(interactive=False)
+        return Client(app=app, do_version_check=False)
+    except Exception:
+        # Any problem building the shared client -> fall back to SDK's own login.
+        return None
+
 # ALCF documented multi-user endpoints (docs.alcf.anl.gov/services/globus-compute).
 # These are stable, ALCF-operated MEP UUIDs. Jobs run under the SUBMITTING user's
 # account (set via user_endpoint_config.account) — not the endpoint owner's.
@@ -195,13 +224,26 @@ def _import_sdk():
 
 
 def cmd_authenticate(args) -> int:
-    """Trigger the one-time interactive Globus Compute login.
+    """Trigger the Globus Compute login.
 
-    The SDK caches tokens in ~/.globus_compute/storage.db. The first call that
-    needs auth prints a URL and blocks for the code. We do the lightest possible
-    authenticated call (construct a Client and hit the web API) to drive login
-    without submitting a job.
+    In the agent-in-a-box the Globus Compute login is part of the ONE combined
+    Globus consent (see alcf_combined_auth.py). So if the combined path is
+    available we do NOT start a separate login here — we run (or confirm) the
+    combined login, which covers inference + IRI + Globus Compute together.
+
+    Standalone (no combined module), fall back to the compute SDK's own login:
+    the first authenticated call prints a URL and blocks for the code.
     """
+    # Preferred: combined single consent.
+    if _combined is not None and _combined.compute_enabled():
+        if _combined.has_tokens() and _has_tokens():
+            print("[remote-bash] Globus Compute is already authenticated via the "
+                  "combined ALCF login (one login covers inference + IRI + compute).")
+            return 0
+        print("[remote-bash] Globus Compute uses the COMBINED ALCF login (one login "
+              "for all services). Running it now ...\n")
+        return _combined._cli_authenticate()
+
     _import_sdk()
     from globus_compute_sdk import Client
 
@@ -226,6 +268,11 @@ def cmd_authenticate(args) -> int:
 
 
 def _has_tokens() -> bool:
+    """True if Globus Compute is authenticated. Prefer the COMBINED consent
+    (one login for all ALCF services); fall back to the compute SDK's own token
+    store (~/.globus_compute/storage.db) for standalone use."""
+    if _combined is not None and _combined.compute_enabled() and _combined.has_tokens():
+        return True
     store = os.path.expanduser("~/.globus_compute/storage.db")
     return os.path.isfile(store) and os.path.getsize(store) > 0
 
@@ -312,6 +359,7 @@ def cmd_run(args) -> int:
     t0 = time.time()
     try:
         with Executor(endpoint_id=endpoint_id, serializer=serializer,
+                      client=_make_compute_client(),
                       user_endpoint_config=_make_uec(args)) as gce:
             fut = gce.submit(remote_bash, args.cmd, args.run_dir, args.venv)
             rc, out, err, host = fut.result(timeout=args.timeout)
@@ -397,6 +445,7 @@ def cmd_batch(args) -> int:
     worst_rc = 0
     try:
         with Executor(endpoint_id=endpoint_id, serializer=serializer,
+                      client=_make_compute_client(),
                       user_endpoint_config=_make_uec(args)) as gce:
             for i, c in enumerate(cmds, 1):
                 t0 = time.time()
