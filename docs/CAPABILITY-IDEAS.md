@@ -133,6 +133,11 @@ user buy-in.*
   Container/software help stays **advisory** (Apptainer workflow: build→push
   registry→`apptainer pull` on ALCF→run `.sif`; Polaris compute needs
   `--fakeroot`).
+  *[2026-08-20: PARTLY STALE — this predates remote-bash (commit 31d9903),
+  which gives arbitrary compute-node bash with Home/Eagle mounted and the ALCF
+  HTTP proxy, so the agent CAN now stage code/small payloads (`git clone`,
+  `pip install`, `printf > file`, `apptainer pull`). Still binds for large
+  data, which needs Globus Transfer. See REMOTE-AGENT-ARCHITECTURE.md §1.]*
 - **No login-node shell** unless we build the opt-in SSH bridge (Tier 3.9).
 - **Filesystem ops are Home/Eagle only** (Polaris fs endpoints 501); async
   (submit→poll `/task/{id}`; a 200 on submit is not success).

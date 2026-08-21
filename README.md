@@ -98,6 +98,22 @@ Then ask the agent to read/write under `/work`. Only that directory is exposed.
 > docker exec -it <container> \
 >   /opt/hermes/.venv/bin/python /opt/alcf/alcf_facility_api_globus_token.py authenticate
 > ```
+
+### Compute-node shell (MCP `bash` tool) & subagents
+
+When the base Hermes supports MCP, the agent's compute-node shell is also
+exposed to the model as a native **`bash` tool**: one warm node held across the
+conversation, with `cd` / `export` / `module load` persisting between commands
+like a real login shell. Recommended knobs at `docker run`:
+
+- `-e ALCF_BASH_ACCOUNT=<project>` — default ALCF project to charge (otherwise
+  the agent looks one up or asks you, then it sticks for the session).
+- `-e ALCF_BASH_ENDPOINT=polaris|crux|sophia|edith`, `-e ALCF_BASH_QUEUE=...`,
+  `-e ALCF_BASH_WALLTIME=H:MM:SS` — where the node comes from (defaults:
+  polaris / debug / 1:00:00). `-e ALCF_ENABLE_MCP_BASH=0` removes the tool.
+- `-e ALCF_DELEGATION_MODEL=google/gemma-4-26B-A4B-it` — run `delegate_task`
+  subagents (e.g. build/test workers) on a **262k-context** model while your
+  chat stays on the default. Defaults to the chat model if unset.
 > The token is stored in the `alcf-agent-home` volume, so it persists.
 >
 > **Network:** the ALCF Inference Service endpoint (`inference-api.alcf.anl.gov`)

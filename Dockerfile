@@ -82,12 +82,14 @@ COPY scripts/entrypoint.sh /opt/alcf/entrypoint.sh
 COPY scripts/iri_hello_world.py /opt/alcf/iri_hello_world.py
 COPY scripts/alcf_facility.py /opt/alcf/alcf_facility.py
 COPY scripts/alcf_remote_bash.py /opt/alcf/alcf_remote_bash.py
+COPY scripts/alcf_bash_mcp.py /opt/alcf/alcf_bash_mcp.py
 COPY scripts/resolve_context_length.py /opt/alcf/resolve_context_length.py
 COPY scripts/populate_models.py /opt/alcf/populate_models.py
 RUN chmod +x /opt/alcf/entrypoint.sh /opt/alcf/alcf_combined_auth.py \
              /opt/alcf/inference_auth_token.py \
              /opt/alcf/alcf_facility_api_globus_token.py /opt/alcf/iri_hello_world.py \
              /opt/alcf/alcf_facility.py /opt/alcf/alcf_remote_bash.py \
+             /opt/alcf/alcf_bash_mcp.py \
              /opt/alcf/resolve_context_length.py /opt/alcf/populate_models.py \
     && chown -R hermes:hermes /opt/alcf
 
@@ -105,6 +107,15 @@ RUN printf '%s\n%s\n' "${ALCF_GIT_SHA}" "${ALCF_BUILD_DATE}" > /opt/alcf/.alcf_v
 # both (a) the HTTP 503 "online but not ready" cold-start you get from
 # less-popular models and (b) gpt-oss-120b's reasoning-token thrash/garble under
 # agentic load. All models remain switchable in the dashboard.
+#
+# Notable OPTIONAL run-time envs (unset by default; see entrypoint.sh):
+#   ALCF_BASH_ACCOUNT       default ALCF project for the MCP `bash` tool (else
+#                           the model asks for / looks up one and it sticks)
+#   ALCF_BASH_ENDPOINT/QUEUE/WALLTIME/TIMEOUT/MAX_OUTPUT  MCP bash tuning
+#   ALCF_ENABLE_MCP_BASH=0  drop the MCP bash tool from the config
+#   ALCF_DELEGATION_MODEL   model for delegate_task subagents (default: the
+#                           launch model). Recommended for heavy build/test
+#                           sessions: google/gemma-4-26B-A4B-it (262k context).
 ENV ALCF_MODEL=google/gemma-4-31B-it \
     ALCF_CLUSTER=sophia \
     ALCF_MAX_TOKENS=2048 \

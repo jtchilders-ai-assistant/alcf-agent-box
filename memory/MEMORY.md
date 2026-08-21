@@ -227,6 +227,10 @@ stderr. Docs: https://docs.alcf.anl.gov/services/globus-compute/ . The
 "build/compile/install/run X on ALCF" request.
 
 Key facts:
+- **PREFER the MCP `bash` tool if it is in your toolset** (server `alcf-bash`):
+  same machinery, but one argument (`command`), account/queue/walltime already
+  bound, one warm node held across the conversation, persistent shell state.
+  Use the CLI below when the tool is absent or you need non-default knobs.
 - **ON by default; prompts for the Globus Compute login at container start**
   (like IRI). Can be hard-disabled with `-e ALCF_ENABLE_GLOBUS_COMPUTE=0` (the
   flag gates all Globus Compute access). If disabled, tell the user it was turned
@@ -240,10 +244,17 @@ Key facts:
   `--queue` (default `debug`). MEPs: polaris + crux.
 - **First command is ~1 min** (the endpoint boots a PBS job); later commands
   while warm are seconds. Raise `--walltime` for long builds.
+- **Shell state persists across commands sharing a `--session`** (default: the
+  endpoint name): `cd`, `export`, and `module load` carry over to the next
+  command, like one persistent shell. UNexported variables do not. `--fresh`
+  starts clean.
+- **Output is truncated to ~20 kB head+tail per command**; the full stream is
+  saved on the node and the marker names the file — `grep`/`tail` that file in
+  a follow-up command instead of re-running a build to see more output.
 - `module load` is needed for apptainer/singularity and most tools (not on the
   default PATH); the helper runs under `bash -lc` so `module` resolves.
-- Destructive-looking commands are refused unless `--yes` — confirm with the
-  user first before ever adding `--yes`.
+- Destructive-looking commands are refused unless `--yes` (CLI) / `confirm=true`
+  (MCP tool) — confirm with the user first, always.
 - Quick status check any time: `/opt/hermes/.venv/bin/python /opt/alcf/alcf_remote_bash.py check`.
 
 ## ALCF systems (orientation)

@@ -18,6 +18,16 @@ test suite, etc. — not just read state.
 
 Reference: https://docs.alcf.anl.gov/services/globus-compute/
 
+## PREFER the `bash` MCP tool when it is in your toolset
+
+If your tool list contains an MCP-provided **`bash`** tool (server `alcf-bash`),
+use THAT for compute-node commands instead of shelling out to this CLI. It is
+the same machinery underneath, but: one required argument (`command`), the
+account/queue/walltime already bound, ONE warm node held across your whole
+conversation, and the same persistent-shell state described below. Fall back to
+the CLI here when the MCP tool is absent or you need non-default
+endpoint/queue/walltime/venv per command.
+
 ## When to load this skill
 
 The user asks to **build / compile / install / run** something *on ALCF* — e.g.
@@ -108,14 +118,39 @@ on the same node `x3108…`).
 build) unless you pass `--keep-going`. This is the recommended mode whenever you
 have 2+ steps.
 
-**Pitfall — one command per line:** in `--cmds-file`, each line is a *separate*
-`bash -lc` invocation, so a multi-line construct (a `<<EOF` heredoc, a `for`/`if`
-block spanning lines) will break — its lines run as independent commands. Keep
-each step on a single line. To write a file on the node, use a single-line form,
-e.g. `printf '...\n' > f` or `echo '...' > f`, not a multi-line heredoc. State
-does persist across steps in a batch (same node, same filesystem, same `--run-dir`
-and any activated `--venv`), so files/vars a step creates are visible to later
-steps — just keep each command itself one line.
+## Shell state — what persists between commands (and what doesn't)
+
+Commands sharing a `--session` (default: the endpoint name, so consecutive
+`run`s and `batch` steps share state automatically) behave like ONE persistent
+shell — a state file on the cluster is restored/saved around every command:
+
+- **`cd` persists.** The next command starts where the last one left off.
+- **`export FOO=...` persists.** (An UNexported `FOO=...` does NOT — use export.)
+- **`module load X` persists** (its effect is exported env: PATH, etc.), so
+  `--cmd 'module load spack-pe-base cmake'` followed by `--cmd 'cmake -B build'`
+  works as separate steps.
+- **Files persist** on the cluster filesystems regardless of session.
+- Per-job vars (`PBS_*`, `TMPDIR`, hostname) deliberately do NOT carry over.
+- State survives the warm block idling out — even a later command landing on a
+  DIFFERENT node restores it (the state file lives on the home filesystem).
+- `--fresh` starts clean; `--session ''` disables state; `--session NAME`
+  keeps separate workstreams isolated.
+
+**Pitfall — one command per line still applies:** in `--cmds-file`, each line is
+a *separate* `bash -lc` invocation, so a multi-line construct (a `<<EOF`
+heredoc, a `for`/`if` block spanning lines) will break — its lines run as
+independent commands. Keep each step on a single line; to write a file on the
+node use a single-line `printf '...\n' > f`, not a heredoc.
+
+## Output limits — grep the log, don't re-run
+
+Combined stdout+stderr beyond `--max-output` bytes (default 20000) is returned
+**head+tail**, and the FULL stream is saved on the node first; the truncation
+marker names the file (under `~/.alcf_remote_bash/logs/`). When a build log is
+truncated, the next step is to `grep -n 'error' <that file>` (or `tail -50`) in
+a follow-up command — do NOT re-run the build to "see more output", and do not
+raise `--max-output` unless you truly need the whole stream (`--full-output`
+allows up to the ~10 MB RPC cap).
 
 ### Activating a venv on the node (`--venv`)
 
@@ -138,9 +173,16 @@ specific environment on the cluster filesystem:
 - `--queue`: PBS queue (default `debug`).
 - `--walltime`: `HH:MM:SS` (default `0:10:00`). Raise for long builds.
 - `--nodes`: nodes per block (default 1).
-- `--run-dir`: working dir on the cluster (default `$HOME`).
+- `--run-dir`: working dir on the cluster (default `$HOME`; a `cd` in a session
+  overrides it for later commands).
 - `--venv`: cluster venv to `source .../bin/activate` before each command.
 - `--timeout`: seconds to wait per command result (default 1200).
+- `--session`: shell-state session name (default: the endpoint name; `''`
+  disables state). See "Shell state" above.
+- `--fresh`: wipe the session state before the first command.
+- `--max-output`: returned stdout+stderr byte budget (default 20000); overflow
+  is truncated head+tail with the full log saved on the node.
+- `--full-output`: return up to the ~10 MB RPC cap.
 - `--keep-going` (`batch` only): continue after a non-zero exit.
 - `--yes`: allow a destructive-looking command (confirm with the user first).
 
@@ -156,10 +198,11 @@ specific environment on the cluster filesystem:
   or, for separate `run` calls, keep `--endpoint/--account/--queue/--walltime`
   IDENTICAL so a later call lands on the still-running block. Changing any of
   those forces a new block (cold start again).
-- **Output size cap:** Globus Compute caps a result payload at ~10 MB. The helper
-  truncates combined stdout+stderr on the node to stay under that, appending a
-  `[truncated — N bytes total]` marker. A very chatty build won't blow up the RPC,
-  but if you need full logs, redirect to a file on the cluster and fetch it.
+- **Output size cap:** the helper returns at most `--max-output` bytes (default
+  20000) head+tail, saving the full stream to `~/.alcf_remote_bash/logs/` on the
+  node — the marker names the file; grep/tail it in a follow-up command.
+  (Globus Compute's own hard cap on a result payload is ~10 MB; `--full-output`
+  goes up to that.)
 - **`module load` is needed** for apptainer/singularity and many tools — they
   are NOT on the default PATH. The helper already uses `bash -lc`, so `module`
   resolves; you still have to `module load` the specific tool in `--cmd`.

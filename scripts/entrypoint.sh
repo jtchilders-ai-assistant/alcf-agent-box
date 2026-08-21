@@ -225,6 +225,88 @@ render_config() {
   log "Launch model '$launch_model' -> provider $launch_provider (per-model output cap)"
   # --- end launch-model provider resolution --------------------------------
 
+  # --- Optional feature blocks (delegation subagents + MCP bash tool) -------
+  # Both are appended AFTER the providers block and each is gated on a runtime
+  # grep of the INSTALLED Hermes source: if this base image predates the
+  # feature, we skip the block (with a log line) instead of risking an unknown
+  # config key at dashboard startup. Same fail-open philosophy as the rest of
+  # this script, and the same grep-gate pattern the Dockerfile patch layer uses.
+  local extra_block=""
+
+  # (a) delegation: route delegate_task subagents. Subagents get their own
+  # FRESH context, so this is the context firewall for build/test loops; set
+  # ALCF_DELEGATION_MODEL to a long-context model (e.g. google/gemma-4-26B-A4B-it,
+  # 262k on Sophia) to give workers 2x the default window. Defaults to the
+  # launch model (always valid, always hot enough to have been chosen).
+  if grep -rqs "delegate_task" /opt/hermes/agent 2>/dev/null; then
+    local delegation_model delegation_provider
+    delegation_model="${ALCF_DELEGATION_MODEL:-$launch_model}"
+    if [ "$delegation_model" = "$launch_model" ]; then
+      delegation_provider="$launch_provider"
+    else
+      # Same provider scan as the launch model (which named provider lists it),
+      # with the same Python-resolver + static fallbacks.
+      delegation_provider="$(printf '%s\n' "$block_for_scan" | awk -v m="$delegation_model" '
+        /^  - name: / { prov = $3; next }
+        $0 ~ "^      " m ":$" { print prov; exit }
+      ')"
+      if [ -z "$delegation_provider" ]; then
+        delegation_provider="$(ALCF_INFER_AUTH="$INFER_AUTH" ALCF_PY="$PY" \
+            ALCF_BASE_URL="$ALCF_BASE_URL" \
+            "$PY" "$ALCF_DIR/populate_models.py" --launch-provider "$delegation_model" \
+            2>>/tmp/populate_models.log || true)"
+        case "$delegation_provider" in custom:*) : ;; ?*) delegation_provider="custom:$delegation_provider" ;; esac
+      else
+        delegation_provider="custom:$delegation_provider"
+      fi
+      [ -n "$delegation_provider" ] || delegation_provider="custom:alcf-sophia"
+    fi
+    extra_block+="$(cat <<EOF
+
+delegation:
+  provider: "$delegation_provider"
+  model: "$delegation_model"
+EOF
+)"
+    log "Delegation (subagents) -> $delegation_model via $delegation_provider"
+  else
+    log "Base Hermes has no delegate_task; skipping delegation config"
+  fi
+
+  # (b) mcp_servers: expose remote-bash to the model as a native `bash` tool
+  # (one required arg, persistent shell semantics, warm node held by the
+  # server) — the tool SHAPE these models were trained on, instead of the
+  # error-prone alcf_remote_bash.py CLI syntax. See scripts/alcf_bash_mcp.py.
+  # Values are baked at render time; ALCF_BASH_ACCOUNT may be empty, in which
+  # case the model is told to pass account=<project> once (sticky).
+  if [[ "${ALCF_ENABLE_GLOBUS_COMPUTE:-1}" != "0" && "${ALCF_ENABLE_MCP_BASH:-1}" != "0" ]] \
+     && grep -rqs "mcp_servers" /opt/hermes/agent 2>/dev/null; then
+    extra_block+="$(cat <<EOF
+
+mcp_servers:
+  alcf-bash:
+    command: "/opt/hermes/.venv/bin/python"
+    args: ["/opt/alcf/alcf_bash_mcp.py"]
+    env:
+      ALCF_BASH_ACCOUNT: "${ALCF_BASH_ACCOUNT:-}"
+      ALCF_BASH_ENDPOINT: "${ALCF_BASH_ENDPOINT:-polaris}"
+      ALCF_BASH_QUEUE: "${ALCF_BASH_QUEUE:-debug}"
+      ALCF_BASH_WALLTIME: "${ALCF_BASH_WALLTIME:-1:00:00}"
+      ALCF_BASH_TIMEOUT: "${ALCF_BASH_TIMEOUT:-1200}"
+      ALCF_BASH_MAX_OUTPUT: "${ALCF_BASH_MAX_OUTPUT:-20000}"
+      ALCF_ENABLE_GLOBUS_COMPUTE: "${ALCF_ENABLE_GLOBUS_COMPUTE:-1}"
+EOF
+)"
+    log "MCP bash tool enabled (endpoint=${ALCF_BASH_ENDPOINT:-polaris}, account=${ALCF_BASH_ACCOUNT:-<unset — model asks/looks up>})"
+  else
+    if [[ "${ALCF_ENABLE_GLOBUS_COMPUTE:-1}" == "0" || "${ALCF_ENABLE_MCP_BASH:-1}" == "0" ]]; then
+      log "MCP bash tool disabled by env flag"
+    else
+      log "Base Hermes has no mcp_servers support; skipping MCP bash tool"
+    fi
+  fi
+  # --- end optional feature blocks ------------------------------------------
+
   # Render: substitute ${...} placeholders, and splice the generated providers
   # block over the sentinel-to-EOF region of the template. The generated block
   # still contains ${ALCF_ACCESS_TOKEN}, so we splice FIRST then substitute.
@@ -237,6 +319,7 @@ render_config() {
   ALCF_DASHBOARD_USER="$ALCF_DASHBOARD_USER" \
   ALCF_DASHBOARD_PASSWORD_HASH="$ALCF_DASHBOARD_PASSWORD_HASH" \
   ALCF_PROVIDERS_BLOCK="$providers_block" \
+  ALCF_EXTRA_CONFIG_BLOCK="$extra_block" \
   "$PY" - "$ALCF_DIR/config.template.yaml" "$CONFIG_OUT" <<'PYEOF'
 import os, sys, string
 src, dst = sys.argv[1], sys.argv[2]
@@ -255,6 +338,13 @@ if block:
         tmpl = tmpl[:line_start] + block + "\n"
     else:
         sys.stderr.write("[entrypoint] sentinel not found; using template as-is\n")
+
+# Append the optional feature blocks (delegation / mcp_servers) AFTER the
+# providers splice — they are top-level keys and gated upstream on the base
+# image actually supporting them.
+extra = os.environ.get("ALCF_EXTRA_CONFIG_BLOCK", "").strip()
+if extra:
+    tmpl = tmpl.rstrip("\n") + "\n\n" + extra + "\n"
 
 # Substitute ${VAR} placeholders from the environment; leave unknown ones as-is.
 out = string.Template(tmpl).safe_substitute(os.environ)

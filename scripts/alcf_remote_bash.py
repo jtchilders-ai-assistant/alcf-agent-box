@@ -35,6 +35,26 @@ WARM REUSE (important for latency):
         a later `run` lands on the still-running block if it hasn't idled out.
     Changing account/queue/walltime forces a new block (cold start again).
 
+SESSION STATE (the "persistent shell" emulation):
+    Every command still runs in a FRESH `bash -lc`, but commands that share a
+    --session (default: the endpoint name) restore/save a state file on the
+    cluster (~/.alcf_remote_bash/<session>.state) around each command, so `cd`,
+    `export FOO=...`, and `module load X` (whose effect is exported env) PERSIST
+    across commands — matching what a bash-trained model expects. Unexported
+    shell variables do NOT persist (use `export`). Per-job identity vars
+    (PBS_*, TMPDIR, HOSTNAME, ...) are deliberately excluded so a finished job
+    can never leak its PBS_NODEFILE etc. into the next one. State lives on the
+    shared home filesystem, so it survives the warm block idling out — and even
+    landing on a different node later. `--fresh` wipes it; `--session ''`
+    disables it.
+
+OUTPUT BUDGET (context-window protection):
+    Combined stdout+stderr beyond --max-output bytes (default 20000) comes back
+    truncated head+tail; the FULL stream is saved on the node under
+    ~/.alcf_remote_bash/logs/ first and the truncation marker names the file, so
+    the follow-up move is `grep -n <pattern> <that file>` — not re-running the
+    build. `--full-output` restores the old behavior (up to the ~10 MB RPC cap).
+
 Examples:
     PY=/opt/hermes/.venv/bin/python
     $PY /opt/alcf/alcf_remote_bash.py authenticate
@@ -49,7 +69,9 @@ Examples:
 
 Verified end-to-end against the Polaris MEP on 2026-08-04 (compiled + ran a C
 program on compute node x3206c0s31b0n0 under the user's account). MEP UUIDs
-re-verified online 2026-08-06 (polaris, crux, sophia, edith).
+re-verified online 2026-08-06 (polaris, crux, sophia, edith). The session-state
+and output-budget layers (2026-08-20) are covered by local unit tests
+(tests/test_layer0.py) but NOT yet re-verified against the live MEP.
 """
 from __future__ import annotations
 
@@ -130,17 +152,35 @@ def _looks_destructive(cmd: str) -> str | None:
 
 
 def remote_bash(command: str, run_dir: str = "$HOME", venv: str = "",
-                result_limit: int = _RESULT_LIMIT):
-    """Executed ON the compute node. Returns (exit_code, stdout, stderr, host).
+                session: str = "", fresh: bool = False,
+                max_output: int = 20000, result_limit: int = 9_500_000):
+    """Executed ON the compute node. Returns (exit_code, stdout, stderr, host, meta).
 
     Runs the command under a login-ish bash so `module` is available. cwd is
     run_dir (created if needed); defaults to the user's $HOME on the cluster.
     If ``venv`` is set, its activate script is sourced before the command.
-    Output is truncated on the node to stay under Globus Compute's result cap.
+
+    SESSION STATE: when ``session`` is set, the wrapper sources
+    ~/.alcf_remote_bash/<session>.state before the command and rewrites it after
+    with the final cwd + all exported variables — so `cd`, `export`, and
+    `module load` (whose effect is exported env: PATH, LOADEDMODULES, ...)
+    persist across calls sharing a session. Unexported shell variables do NOT
+    persist. Per-job identity vars (PBS_*, GLOBUS_*, PARSL_*, TMPDIR, HOSTNAME,
+    ...) are excluded from the save so a finished job cannot leak a stale
+    PBS_NODEFILE (or similar) into the next block. ``fresh`` wipes the state
+    first. Note ``result_limit`` and ``max_output`` defaults are literals, not
+    module globals: this function's source is shipped to the worker, where
+    module globals do not exist.
+
+    OUTPUT: combined stdout+stderr beyond ``max_output`` bytes is truncated
+    head+tail; the FULL stream is saved first to ~/.alcf_remote_bash/logs/ on
+    the node (capped at 50 MB) and the marker names the file. ``result_limit``
+    stays the hard ceiling (Globus Compute caps a result payload at ~10 MB).
     """
     import os
     import socket
     import subprocess
+    import time
 
     host = socket.gethostname()
     workdir = os.path.expandvars(run_dir)
@@ -149,12 +189,54 @@ def remote_bash(command: str, run_dir: str = "$HOME", venv: str = "",
     except Exception:
         workdir = os.path.expanduser("~")
 
-    # Optionally activate a venv for this command (colleague's `config_key`
-    # technique, generalized: source <venv>/bin/activate before the command).
-    full_cmd = command
+    state_dir = os.path.join(os.path.expanduser("~"), ".alcf_remote_bash")
+    logs_dir = os.path.join(state_dir, "logs")
+    try:
+        os.makedirs(logs_dir, mode=0o700, exist_ok=True)
+    except Exception:
+        logs_dir = ""
+
+    # --- assemble the wrapper: restore state -> venv -> command -> save state.
+    # Parts are newline-joined so the user command may itself contain &&, ;, or
+    # multiple lines without interfering with the rc capture that follows it.
+    parts = []
+    state_file = ""
+    tag = "cmd"
+    if session:
+        tag = "".join(c if (c.isalnum() or c in "-_.") else "_" for c in session)
+        state_file = os.path.join(state_dir, tag + ".state")
+        if fresh:
+            try:
+                os.remove(state_file)
+            except OSError:
+                pass
+        parts.append('{ [ -f "%s" ] && . "%s"; } 2>/dev/null || true'
+                     % (state_file, state_file))
     if venv:
+        # Optionally activate a venv for this command (colleague's `config_key`
+        # technique, generalized). `|| exit $?` preserves the old `&&` strictness:
+        # a broken venv path fails the call instead of running without it.
         activate = os.path.join(os.path.expandvars(venv).rstrip("/"), "bin", "activate")
-        full_cmd = f"source {activate} && {command}"
+        parts.append('source "%s" || exit $?' % activate)
+    parts.append(command)
+    parts.append("__alcf_rc=$?")
+    if state_file:
+        # Save cwd + exported env (module state IS exported env). Deny per-job /
+        # per-shell identity vars; written via tmp+mv so a mid-write kill can't
+        # corrupt the state. Plain string concat on purpose — no %-formatting,
+        # so the printf %q survives literally.
+        deny_eq = "PWD|OLDPWD|SHLVL|SHELLOPTS|BASHOPTS|HOSTNAME|HOME|USER|LOGNAME|TERM|TMPDIR|_"
+        deny_prefix = "PBS_|GLOBUS_|PARSL_|SLURM_"
+        parts.append(
+            '{ printf "cd %q 2>/dev/null || true\\n" "$PWD"; export -p'
+            " | grep -Ev '^declare -x (" + deny_eq + ")='"
+            " | grep -Ev '^declare -x (" + deny_prefix + ")'; } > "
+            + '"' + state_file + '.tmp" 2>/dev/null'
+            + ' && mv -f "' + state_file + '.tmp" "' + state_file + '" 2>/dev/null'
+            + " || true"
+        )
+    parts.append("exit $__alcf_rc")
+    full_cmd = "\n".join(parts)
 
     # `bash -lc` so module/spack init files load and `module` resolves; without
     # it, apptainer/module are not on PATH (verified in the spike).
@@ -167,25 +249,60 @@ def remote_bash(command: str, run_dir: str = "$HOME", venv: str = "",
     out = res.stdout.decode("utf-8", "replace")
     err = res.stderr.decode("utf-8", "replace")
 
-    # Truncate on the node to respect the ~10 MB result limit. Split the budget
-    # proportionally so a huge stdout doesn't starve a small stderr (or vice versa).
-    def _truncate(s: str, max_bytes: int) -> str:
-        b = s.encode("utf-8", "replace")
-        if len(b) <= max_bytes:
-            return s
-        return b[:max_bytes].decode("utf-8", "ignore") + \
-            f"\n[truncated — {len(b)} bytes total]"
+    # --- output budget: head+tail truncation with a full spill file on the node.
+    def _squeeze(text, budget, log_path):
+        """Return (text-or-truncated, saved_log_path_or_'', full_byte_count)."""
+        b = text.encode("utf-8", "replace")
+        if len(b) <= budget:
+            return text, "", len(b)
+        saved = ""
+        if log_path:
+            try:
+                with open(log_path, "wb") as fh:
+                    fh.write(b[:50_000_000])
+                saved = log_path
+            except Exception:
+                saved = ""
+        head_n = max(budget // 3, 100)
+        tail_n = max(budget - head_n, 100)
+        head = b[:head_n].decode("utf-8", "ignore")
+        tail = b[-tail_n:].decode("utf-8", "ignore")
+        omitted = max(len(b) - head_n - tail_n, 0)
+        if saved:
+            hint = ("full output on the node: %s — grep/tail it in a follow-up "
+                    "command instead of re-running" % saved)
+        else:
+            hint = "full output NOT saved (log dir unavailable)"
+        marker = "\n[... %d of %d bytes omitted — %s ...]\n" % (omitted, len(b), hint)
+        return head + marker + tail, saved, len(b)
 
-    ob, eb = len(out.encode()), len(err.encode())
+    # Split the budget proportionally so a huge stdout doesn't starve a small
+    # stderr (or vice versa); each stream keeps at least a 10% floor.
+    budget = max(1000, min(int(max_output or 20000), int(result_limit)))
+    ob = len(out.encode("utf-8", "replace"))
+    eb = len(err.encode("utf-8", "replace"))
     total = ob + eb
-    if total > result_limit:
+    if total > budget:
         ratio = ob / total if total else 0.5
-        out_budget = max(int(result_limit * ratio), min(ob, result_limit // 10))
-        err_budget = max(result_limit - out_budget, min(eb, result_limit // 10))
-        out = _truncate(out, out_budget)
-        err = _truncate(err, err_budget)
+        out_budget = max(int(budget * ratio), min(ob, budget // 10))
+        err_budget = max(budget - out_budget, min(eb, budget // 10))
+    else:
+        out_budget, err_budget = ob, eb
+    ts = int(time.time())
+    out_log = os.path.join(logs_dir, "%s-%d.out.log" % (tag, ts)) if logs_dir else ""
+    err_log = os.path.join(logs_dir, "%s-%d.err.log" % (tag, ts)) if logs_dir else ""
+    out, out_saved, ob_full = _squeeze(out, out_budget, out_log)
+    err, err_saved, eb_full = _squeeze(err, err_budget, err_log)
 
-    return (res.returncode, out, err, host)
+    meta = {
+        "session": session or "",
+        "state_file": state_file,
+        "stdout_bytes": ob_full,
+        "stderr_bytes": eb_full,
+        "stdout_log": out_saved,
+        "stderr_log": err_saved,
+    }
+    return (res.returncode, out, err, host, meta)
 
 
 def _enabled() -> bool:
@@ -311,11 +428,14 @@ def _make_uec(args) -> dict:
     return uec
 
 
-def _print_result(rc, out, err, host, dt, as_json):
+def _print_result(rc, out, err, host, dt, as_json, meta=None):
     if as_json:
         import json
-        print(json.dumps({"exit_code": rc, "host": host, "stdout": out,
-                          "stderr": err, "seconds": round(dt, 1)}, indent=2))
+        doc = {"exit_code": rc, "host": host, "stdout": out,
+               "stderr": err, "seconds": round(dt, 1)}
+        if meta:
+            doc["meta"] = meta
+        print(json.dumps(doc, indent=2))
         return
     print("\n" + "=" * 60)
     print(f"[remote-bash] compute node : {host}   ({dt:.1f}s)")
@@ -323,6 +443,9 @@ def _print_result(rc, out, err, host, dt, as_json):
     print(f"[remote-bash] --- stdout ---\n{out}", end="" if out.endswith("\n") else "\n")
     if err.strip():
         print(f"[remote-bash] --- stderr ---\n{err}", end="" if err.endswith("\n") else "\n")
+    if meta and (meta.get("stdout_log") or meta.get("stderr_log")):
+        print(f"[remote-bash] output truncated; full logs on the node: "
+              f"{meta.get('stdout_log') or '-'} / {meta.get('stderr_log') or '-'}")
     print("=" * 60)
 
 
@@ -346,10 +469,14 @@ def cmd_run(args) -> int:
 
     endpoint_id = MEPS[args.endpoint]
     serializer = ComputeSerializer(strategy_code=AllCodeStrategies())
+    session = args.endpoint if args.session is None else args.session
+    max_out = _RESULT_LIMIT if args.full_output else args.max_output
 
     print(f"[remote-bash] endpoint={args.endpoint} ({endpoint_id})", flush=True)
     print(f"[remote-bash] account={args.account} queue={args.queue} "
           f"walltime={args.walltime}", flush=True)
+    print(f"[remote-bash] session={session or 'OFF'}"
+          f"{' (fresh)' if args.fresh else ''}", flush=True)
     if args.venv:
         print(f"[remote-bash] venv={args.venv}", flush=True)
     print(f"[remote-bash] cmd={args.cmd!r}", flush=True)
@@ -361,8 +488,9 @@ def cmd_run(args) -> int:
         with Executor(endpoint_id=endpoint_id, serializer=serializer,
                       client=_make_compute_client(),
                       user_endpoint_config=_make_uec(args)) as gce:
-            fut = gce.submit(remote_bash, args.cmd, args.run_dir, args.venv)
-            rc, out, err, host = fut.result(timeout=args.timeout)
+            fut = gce.submit(remote_bash, args.cmd, args.run_dir, args.venv,
+                             session, args.fresh, max_out)
+            rc, out, err, host, meta = fut.result(timeout=args.timeout)
     except Exception as exc:
         print(f"\n[remote-bash] submission/result FAILED: {type(exc).__name__}: {exc}",
               file=sys.stderr)
@@ -372,7 +500,7 @@ def cmd_run(args) -> int:
         return 6
     dt = time.time() - t0
 
-    _print_result(rc, out, err, host, dt, args.json)
+    _print_result(rc, out, err, host, dt, args.json, meta)
     return 0 if rc == 0 else 2
 
 
@@ -430,12 +558,16 @@ def cmd_batch(args) -> int:
 
     endpoint_id = MEPS[args.endpoint]
     serializer = ComputeSerializer(strategy_code=AllCodeStrategies())
+    session = args.endpoint if args.session is None else args.session
+    max_out = _RESULT_LIMIT if args.full_output else args.max_output
 
     print(f"[remote-bash] BATCH of {len(cmds)} command(s) on one warm node",
           flush=True)
     print(f"[remote-bash] endpoint={args.endpoint} ({endpoint_id})", flush=True)
     print(f"[remote-bash] account={args.account} queue={args.queue} "
           f"walltime={args.walltime}", flush=True)
+    print(f"[remote-bash] session={session or 'OFF'}"
+          f"{' (fresh)' if args.fresh else ''}", flush=True)
     if args.venv:
         print(f"[remote-bash] venv={args.venv}", flush=True)
     print("[remote-bash] first command pays cold start (~1 min); rest are warm ...",
@@ -449,14 +581,15 @@ def cmd_batch(args) -> int:
                       user_endpoint_config=_make_uec(args)) as gce:
             for i, c in enumerate(cmds, 1):
                 t0 = time.time()
-                fut = gce.submit(remote_bash, c, args.run_dir, args.venv)
-                rc, out, err, host = fut.result(timeout=args.timeout)
+                fut = gce.submit(remote_bash, c, args.run_dir, args.venv,
+                                 session, args.fresh and i == 1, max_out)
+                rc, out, err, host, meta = fut.result(timeout=args.timeout)
                 dt = time.time() - t0
                 tag = "cold" if i == 1 else "warm"
                 print(f"\n[remote-bash] === command {i}/{len(cmds)} "
                       f"({tag}, {dt:.1f}s, rc={rc}) on {host} ===", flush=True)
                 print(f"  $ {c}", flush=True)
-                _print_result(rc, out, err, host, dt, args.json)
+                _print_result(rc, out, err, host, dt, args.json, meta)
                 results.append((c, rc))
                 if rc != 0:
                     worst_rc = rc
@@ -502,6 +635,18 @@ def main() -> int:
                             "before each command (optional)")
         p.add_argument("--timeout", type=int, default=1200,
                        help="seconds to wait per command result (default 1200)")
+        p.add_argument("--session", default=None,
+                       help="shell-state session name: cd/export/module load "
+                            "persist across commands sharing a session "
+                            "(default: the endpoint name; '' disables state)")
+        p.add_argument("--fresh", action="store_true",
+                       help="wipe the session state before the first command")
+        p.add_argument("--max-output", type=int, default=20000, dest="max_output",
+                       help="combined stdout+stderr byte budget returned per "
+                            "command (default 20000); overflow is truncated "
+                            "head+tail with the full log saved on the node")
+        p.add_argument("--full-output", action="store_true", dest="full_output",
+                       help="return up to the ~10 MB RPC cap instead of --max-output")
         p.add_argument("--yes", action="store_true",
                        help="allow destructive-looking command(s)")
         p.add_argument("--json", action="store_true")
