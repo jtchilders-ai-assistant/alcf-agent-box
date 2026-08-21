@@ -67,6 +67,47 @@ remote-bash runs **arbitrary code on ALCF charged to the user's allocation**, so
     #   docker exec -it <container> /opt/hermes/.venv/bin/python \
     #     /opt/alcf/alcf_remote_bash.py authenticate
 
+## THE TWO MACHINES — container vs cluster (read this first)
+
+Your `terminal` / `write_file` / `read_file` tools act on the **agent
+container**; ONLY the `--cmd` string runs on the **cluster**. The two share no
+filesystem:
+
+- Container `$HOME` = `/opt/data`. Cluster `$HOME` = `/home/<username>`.
+  `/opt/data`, `/opt/hermes`, `/opt/alcf` do NOT exist on any ALCF node.
+- **SINGLE-QUOTE `--cmd`.** In `--cmd "cd $HOME/x"` the double quotes expand
+  `$HOME` in the container (→ `/opt/data/x`) BEFORE submission. The helper
+  refuses commands referencing container-only paths (override:
+  `--allow-container-paths`).
+- `write_file` cannot create files on the cluster (and IRI upload is a 501
+  stub). Stage a small file with a single-line `printf '...\n' > file` in
+  `--cmd`, or `git clone` on the node (the proxy is set up automatically).
+- Start a build session with an orientation probe:
+  `--cmd 'whoami && echo $HOME && pwd && hostname'` and use THOSE paths.
+
+## Internet access from compute nodes (proxy — automatic)
+
+Compute nodes have no direct outbound internet. The helper automatically
+exports `http_proxy`/`https_proxy=http://proxy.alcf.anl.gov:3128` (when unset)
+before your command, so `git clone` / `curl` / `pip install` / `apptainer pull`
+work on the node. `--no-proxy-setup` disables the injection. If a PBS script
+will run OUTSIDE remote-bash, include those exports in it yourself.
+
+## Timeouts — set BOTH, and check the queue before retrying
+
+1. The helper waits `--timeout` seconds (default 1200) for the result — but
+   **your `terminal` tool kills the whole CLI at ~180s by default**, which is
+   shorter than a cold start plus any queue wait. When calling this CLI through
+   `terminal`, ALWAYS set the terminal tool's own timeout parameter ≥ the
+   helper's `--timeout`. (The MCP `bash` tool manages this itself — prefer it.)
+2. **A timeout usually means the PBS job is stuck in the queue, not that the
+   command failed.** Resubmitting spawns ANOTHER queued job and pays another
+   cold start. Instead check queue congestion first —
+   `/opt/hermes/.venv/bin/python /opt/alcf/alcf_facility.py jobs --cluster
+   polaris` (see `alcf-facility-status-and-jobs`) — then wait, switch
+   `--endpoint`, or tell the user. The killed command may still finish on the
+   node; shared `--session` state will reflect it.
+
 ## Running commands
 
     PY=/opt/hermes/.venv/bin/python
@@ -117,6 +158,12 @@ on the same node `x3108…`).
 `batch` stops at the first non-zero exit (so a failed configure doesn't waste a
 build) unless you pass `--keep-going`. This is the recommended mode whenever you
 have 2+ steps.
+
+**Prefer `--cmds-file` over long inline `--cmd` strings.** Write the steps to a
+file with `write_file` first (the file lives in the container — that's fine,
+the CLI reads it locally and ships each line to the node). Long, quote-heavy
+inline commands have to survive multiple escaping layers and are the main
+trigger for malformed tool calls; a cmds-file keeps each step clean.
 
 ## Shell state — what persists between commands (and what doesn't)
 
@@ -185,6 +232,9 @@ specific environment on the cluster filesystem:
 - `--full-output`: return up to the ~10 MB RPC cap.
 - `--keep-going` (`batch` only): continue after a non-zero exit.
 - `--yes`: allow a destructive-looking command (confirm with the user first).
+- `--no-proxy-setup`: do NOT auto-export the ALCF HTTP proxy on the node.
+- `--allow-container-paths`: skip the refusal of commands that reference
+  container-only paths (`/opt/data`, `/opt/hermes`, `/opt/alcf`).
 
 ## Behavior & pitfalls (verified 2026-08-04)
 

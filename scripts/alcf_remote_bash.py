@@ -151,14 +151,43 @@ def _looks_destructive(cmd: str) -> str | None:
     return None
 
 
+# Paths that exist only inside the agent container — never on an ALCF node. A
+# remote command referencing one is virtually always the double-quoting footgun
+# (--cmd "... $HOME/..." expands $HOME to /opt/data LOCALLY before submission)
+# or container/cluster confusion, and would fail or write to the wrong machine.
+_CONTAINER_ONLY_PATHS = ("/opt/data", "/opt/hermes", "/opt/alcf")
+
+
+def _container_path_refs(cmd: str) -> list[str]:
+    return [p for p in _CONTAINER_ONLY_PATHS if p in cmd]
+
+
+def _refuse_container_paths(cmd: str) -> None:
+    hits = _container_path_refs(cmd)
+    print(
+        f"REFUSED: command references container-only path(s) {hits} which do "
+        "NOT exist on any ALCF node.\n"
+        f"  cmd: {cmd}\n"
+        "Likely cause: $HOME inside a DOUBLE-quoted --cmd expanded locally to "
+        "/opt/data before submission. Single-quote the command so $HOME "
+        "expands on the node (/home/<user>). If you really mean a container "
+        "path, re-run with --allow-container-paths.",
+        file=sys.stderr,
+    )
+
+
 def remote_bash(command: str, run_dir: str = "$HOME", venv: str = "",
                 session: str = "", fresh: bool = False,
-                max_output: int = 20000, result_limit: int = 9_500_000):
+                max_output: int = 20000, result_limit: int = 9_500_000,
+                proxy: bool = True):
     """Executed ON the compute node. Returns (exit_code, stdout, stderr, host, meta).
 
     Runs the command under a login-ish bash so `module` is available. cwd is
     run_dir (created if needed); defaults to the user's $HOME on the cluster.
     If ``venv`` is set, its activate script is sourced before the command.
+    If ``proxy`` is true (the default), http_proxy/https_proxy are exported to
+    the ALCF facility proxy when not already set — compute nodes have no direct
+    outbound internet, so git/curl/pip fail without it.
 
     SESSION STATE: when ``session`` is set, the wrapper sources
     ~/.alcf_remote_bash/<session>.state before the command and rewrites it after
@@ -212,6 +241,14 @@ def remote_bash(command: str, run_dir: str = "$HOME", venv: str = "",
                 pass
         parts.append('{ [ -f "%s" ] && . "%s"; } 2>/dev/null || true'
                      % (state_file, state_file))
+    if proxy:
+        # ALCF compute nodes have no direct outbound internet; git/curl/pip need
+        # the facility proxy. ${var:-default} keeps any value already set (by
+        # the environment, the restored session state, or the user's command).
+        parts.append(
+            'export http_proxy="${http_proxy:-http://proxy.alcf.anl.gov:3128}" '
+            'https_proxy="${https_proxy:-http://proxy.alcf.anl.gov:3128}"'
+        )
     if venv:
         # Optionally activate a venv for this command (colleague's `config_key`
         # technique, generalized). `|| exit $?` preserves the old `&&` strictness:
@@ -466,6 +503,9 @@ def cmd_run(args) -> int:
             file=sys.stderr,
         )
         return 5
+    if _container_path_refs(args.cmd) and not args.allow_container_paths:
+        _refuse_container_paths(args.cmd)
+        return 7
 
     endpoint_id = MEPS[args.endpoint]
     serializer = ComputeSerializer(strategy_code=AllCodeStrategies())
@@ -489,7 +529,8 @@ def cmd_run(args) -> int:
                       client=_make_compute_client(),
                       user_endpoint_config=_make_uec(args)) as gce:
             fut = gce.submit(remote_bash, args.cmd, args.run_dir, args.venv,
-                             session, args.fresh, max_out)
+                             session, args.fresh, max_out,
+                             proxy=args.proxy_setup)
             rc, out, err, host, meta = fut.result(timeout=args.timeout)
     except Exception as exc:
         print(f"\n[remote-bash] submission/result FAILED: {type(exc).__name__}: {exc}",
@@ -555,6 +596,11 @@ def cmd_batch(args) -> int:
                     file=sys.stderr,
                 )
                 return 5
+    if not args.allow_container_paths:
+        for c in cmds:
+            if _container_path_refs(c):
+                _refuse_container_paths(c)
+                return 7
 
     endpoint_id = MEPS[args.endpoint]
     serializer = ComputeSerializer(strategy_code=AllCodeStrategies())
@@ -582,7 +628,8 @@ def cmd_batch(args) -> int:
             for i, c in enumerate(cmds, 1):
                 t0 = time.time()
                 fut = gce.submit(remote_bash, c, args.run_dir, args.venv,
-                                 session, args.fresh and i == 1, max_out)
+                                 session, args.fresh and i == 1, max_out,
+                                 proxy=args.proxy_setup)
                 rc, out, err, host, meta = fut.result(timeout=args.timeout)
                 dt = time.time() - t0
                 tag = "cold" if i == 1 else "warm"
@@ -649,6 +696,13 @@ def main() -> int:
                        help="return up to the ~10 MB RPC cap instead of --max-output")
         p.add_argument("--yes", action="store_true",
                        help="allow destructive-looking command(s)")
+        p.add_argument("--no-proxy-setup", action="store_false", dest="proxy_setup",
+                       help="do NOT auto-export the ALCF HTTP proxy "
+                            "(proxy.alcf.anl.gov:3128) on the node")
+        p.add_argument("--allow-container-paths", action="store_true",
+                       dest="allow_container_paths",
+                       help="run even if the command references container-only "
+                            "paths (/opt/data, /opt/hermes, /opt/alcf)")
         p.add_argument("--json", action="store_true")
 
     r = sub.add_parser("run", help="submit ONE bash command to a compute node")

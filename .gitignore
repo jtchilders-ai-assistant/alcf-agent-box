@@ -4,3 +4,5 @@ __pycache__/
 *.log
 tokens.json
 .globus/
+# extracted container-volume dumps (contain Globus tokens + session data)
+extracted/

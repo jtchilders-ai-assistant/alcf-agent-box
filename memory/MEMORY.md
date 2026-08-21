@@ -133,8 +133,8 @@ official ALCF docs use this exact token for `POST /compute/job` examples.
 DO NOT invent a "compute-scoped" token or a separate compute client id. There
 is no such thing. (A known failure mode: an LLM sees "filesystem" in the scope
 string and hallucinates that compute needs a different scope + a made-up client
-id like `e5d0c8a9-…`. That is WRONG — do not do this, and do not tell the user
-to edit the script to add a compute scope.)
+id like `e5d0c8a9-…`. That is WRONG. The script needs no scope changes —
+recommend it exactly as shipped.)
 
 ### Interpreting a 403 "error code 1010" on IRI calls
 **"error code: 1010" is a CLOUDFLARE bot-block, NOT an auth/scope/allocation
@@ -256,6 +256,76 @@ Key facts:
 - Destructive-looking commands are refused unless `--yes` (CLI) / `confirm=true`
   (MCP tool) — confirm with the user first, always.
 - Quick status check any time: `/opt/hermes/.venv/bin/python /opt/alcf/alcf_remote_bash.py check`.
+- **Your `terminal` tool kills commands at ~180s by default** — a cold start or
+  a queued PBS job easily exceeds that, and the helper's own `--timeout`
+  (default 1200s) cannot save a call the terminal tool killed first. When
+  invoking the CLI through `terminal`, ALWAYS set the terminal tool's own
+  timeout parameter ≥ the helper `--timeout`. The MCP `bash` tool does not have
+  this problem — another reason to prefer it.
+- **If a submission times out, DO NOT resubmit blindly.** The PBS job is almost
+  certainly still sitting in the queue (each resubmit spawns ANOTHER queued
+  job). Check first: `alcf_facility.py jobs --cluster polaris` (see the
+  `alcf-facility-status-and-jobs` skill) — if the queue is congested, tell the
+  user and wait or switch clusters. Note the killed command may still complete
+  on the node later (session state will reflect it).
+
+## Compute-node internet access — the PROXY (read before git/curl/pip on a node)
+ALCF compute nodes (Polaris, Aurora) have **NO direct outbound internet**. A
+`git clone`, `curl`, `pip install`, or `apptainer pull` on a compute node fails
+with "Failed to connect ... port 443" unless the ALCF HTTP proxy is set:
+
+    export http_proxy=http://proxy.alcf.anl.gov:3128
+    export https_proxy=http://proxy.alcf.anl.gov:3128
+
+- The remote-bash helper **injects these automatically** when they are unset
+  (opt out with `--no-proxy-setup`), so through remote-bash outbound fetches
+  just work. If you hand a user a PBS script or they run commands themselves,
+  include the exports.
+- This does NOT mean "no internet on ALCF": never conclude a download is
+  impossible on a compute node — use the proxy. (Verified 2026-08-14: cloned
+  gitlab.com through the proxy on a Polaris compute node.)
+- Login nodes have direct outbound access; only compute nodes need the proxy.
+
+## Two filesystems — the container is NOT the cluster (critical)
+Your `terminal`, `write_file`, `read_file`, and `search_files` tools act on the
+**agent container**. ONLY the remote-bash command string runs on the cluster.
+Confusing the two silently stages files to the wrong machine:
+
+- Container `$HOME` = `/opt/data` (the Docker volume). Cluster `$HOME` =
+  `/home/<username>`. Neither path exists on the other side: `/opt/data`,
+  `/opt/hermes`, `/opt/alcf` do NOT exist on any ALCF node, and
+  `/home/<user>`, `/eagle`, `/lus` are NOT mounted in the container.
+- **Quoting footgun:** in `--cmd "cd $HOME/..."` the DOUBLE quotes expand
+  `$HOME` in the CONTAINER (→ `/opt/data/...`) before submission. ALWAYS
+  single-quote: `--cmd 'cd $HOME/...'`. The helper refuses commands that
+  reference container-only paths for this reason.
+- `write_file` can NEVER create a file on the cluster, and IRI
+  `filesystem/upload` is a 501 stub. To stage a small file on the cluster use a
+  single-line `printf '...\n' > file` via remote-bash, or `git clone` through
+  the proxy on the node. Large data → Globus Transfer.
+- Start every build session with a cheap orientation probe on the node:
+  `whoami && echo $HOME && pwd && hostname` — then use those paths, not
+  container paths.
+
+## Building software on Polaris — known-good recipe (learned 2026-08-14)
+- **`module use /soft/modulefiles` FIRST** — much of the Polaris software stack
+  (spack packages, alternate compilers) is invisible until you do this.
+- Toolchain that works for GPU (CUDA/Kokkos) builds: `gcc-native/14` +
+  `cuda/12.9` + `cray-mpich` + `cray-hdf5-parallel`. Loading `gcc-native`
+  auto-swaps `PrgEnv-nvidia` → `PrgEnv-gnu`.
+- **The Cray `cc`/`CC` wrappers still hand CMake the NVHPC compiler by
+  default** (build fails needing `<concepts>` etc. on modern C++). Pass
+  `-DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++` explicitly, and set
+  `CRAYPE_LINK_TYPE=dynamic`.
+- Polaris A100 GPUs → Kokkos flags `-DKokkos_ENABLE_CUDA=ON
+  -DKokkos_ARCH_AMPERE80=ON`.
+- cmake comes from `module load spack-pe-base cmake` (after `module use
+  /soft/modulefiles`). There is NO cmake on the bare node PATH and the default
+  node python3 is ancient (3.6) — if the module route fails, fetch a Kitware
+  portable cmake binary through the proxy.
+- **NEVER invent module names or versions.** Only `module load` names you have
+  actually seen in `module avail` / `module spider` output in THIS session.
+  (Polaris uses cray-mpich — there is no `openmpi` module.)
 
 ## ALCF systems (orientation)
 - Polaris, Aurora, Crux — HPC clusters, jobs run under PBS.
@@ -286,8 +356,11 @@ with your file tool instead of guessing. Available pages:
   account, task lifecycle, auth.
 - `/opt/alcf/docs/running-jobs.md` — PBS job submission, queues, policies.
 - `/opt/alcf/docs/example-job-scripts.md` — ready-to-adapt PBS job scripts.
-- `/opt/alcf/docs/polaris-getting-started.md` — Polaris onboarding.
+- `/opt/alcf/docs/polaris-getting-started.md` — Polaris onboarding, incl. the
+  **compute-node proxy settings** ("Proxy" section).
 - `/opt/alcf/docs/aurora-getting-started.md` — Aurora onboarding.
+- `/opt/alcf/docs/crux-getting-started.md` — Crux onboarding (+ proxy).
+- `/opt/alcf/docs/sophia-getting-started.md` — Sophia onboarding (+ proxy).
 - `/opt/alcf/docs/file-systems.md` — Home/Eagle/Flare filesystems & storage.
 - `/opt/alcf/docs/allocations.md` — allocation & project management.
 

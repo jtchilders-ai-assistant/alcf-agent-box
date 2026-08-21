@@ -146,6 +146,54 @@ class DestructiveGateTests(unittest.TestCase):
             self.assertIsNone(rb._looks_destructive(cmd), cmd)
 
 
+class ContainerPathGuardTests(unittest.TestCase):
+    def test_flags_container_only_paths(self):
+        for cmd in ("cd /opt/data/pepper && make",
+                    "cp -r /opt/data/pepper_repo $HOME/",
+                    "source /opt/data/agent-in-a-box/setup_env.sh",
+                    "/opt/hermes/.venv/bin/python x.py",
+                    "cat /opt/alcf/docs/iri-api.md"):
+            self.assertTrue(rb._container_path_refs(cmd), cmd)
+
+    def test_leaves_cluster_paths_alone(self):
+        for cmd in ("cd $HOME/pepper && make",
+                    "ls /home/parton /eagle/datascience",
+                    "module load spack-pe-base cmake",
+                    "git clone https://gitlab.com/spice-mc/pepper"):
+            self.assertEqual(rb._container_path_refs(cmd), [], cmd)
+
+
+class ProxyInjectionTests(_FakeHomeMixin):
+    def setUp(self):
+        super().setUp()
+        # Scrub inherited proxy vars so we observe the wrapper's own injection.
+        self._saved_proxy = {}
+        for k in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
+            if k in os.environ:
+                self._saved_proxy[k] = os.environ.pop(k)
+
+    def tearDown(self):
+        os.environ.update(self._saved_proxy)
+        super().tearDown()
+
+    def test_proxy_exported_by_default(self):
+        rc, out, *_ = self.rbash('echo "$http_proxy | $https_proxy"')
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            out.strip(),
+            "http://proxy.alcf.anl.gov:3128 | http://proxy.alcf.anl.gov:3128")
+
+    def test_preset_proxy_wins(self):
+        rc, out, *_ = self.rbash(
+            'http_proxy=http://mine:1 bash -c \'echo "$http_proxy"\'')
+        self.assertEqual(out.strip(), "http://mine:1")
+
+    def test_opt_out(self):
+        rc, out, *_ = rb.remote_bash('echo "${http_proxy:-unset}"', "$HOME", "",
+                                     "noproxy", False, 20000, proxy=False)
+        self.assertEqual(out.strip(), "unset")
+
+
 class McpServerTests(_FakeHomeMixin):
     """Round-trip the MCP stdio protocol against the real server subprocess in
     local-exec mode (same remote_bash, no Globus)."""
@@ -233,6 +281,12 @@ class McpServerTests(_FakeHomeMixin):
         is_err, text = self._call_bash({"command": "exit 3"})
         self.assertFalse(is_err)
         self.assertIn("[exit 3", text)
+
+        # container-only paths are refused (no override via MCP)
+        is_err, text = self._call_bash(
+            {"command": "cp -r /opt/data/pepper_repo $HOME/"})
+        self.assertTrue(is_err)
+        self.assertIn("container-only", text)
 
         # destructive gate: refused without confirm, runs with it
         is_err, text = self._call_bash(

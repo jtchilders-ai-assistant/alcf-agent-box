@@ -25,6 +25,8 @@ PAGES = [
     ("running-jobs/example-job-scripts.md", "example-job-scripts.md"),
     ("polaris/getting-started.md", "polaris-getting-started.md"),
     ("aurora/getting-started-on-aurora.md", "aurora-getting-started.md"),
+    ("crux/getting-started.md", "crux-getting-started.md"),
+    ("sophia/getting-started.md", "sophia-getting-started.md"),
     ("data-management/filesystem-and-storage/index.md", "file-systems.md"),
     ("account-project-management/allocation-management/allocation-management.md", "allocations.md"),
 ]

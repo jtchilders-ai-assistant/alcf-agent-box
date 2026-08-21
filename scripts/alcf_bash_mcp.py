@@ -234,6 +234,17 @@ def handle_call(session: BashSession, args: dict) -> dict:
             "/opt/alcf/alcf_remote_bash.py authenticate",
             is_error=True)
 
+    bad_paths = rb._container_path_refs(command)
+    if bad_paths:
+        return _text_result(
+            f"REFUSED: command references container-only path(s) {bad_paths} "
+            "which do not exist on any ALCF node. Likely cause: a container "
+            "path (e.g. $HOME expanded in the agent container to /opt/data) "
+            "leaked into a command meant for the cluster. Rewrite it with "
+            "cluster paths (node $HOME is /home/<user>; probe with "
+            "`whoami && echo $HOME && pwd`).",
+            is_error=True)
+
     hit = rb._looks_destructive(command)
     if hit and not args.get("confirm"):
         return _text_result(
