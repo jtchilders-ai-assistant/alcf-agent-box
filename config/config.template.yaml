@@ -79,6 +79,17 @@ display:
   # Web dashboard is the primary surface; the CLI/TUI still work if exec'd in.
   interface: cli
 
+terminal:
+  # Default per-command timeout for the agent's terminal tool. Stock Hermes is
+  # 180s, which killed every alcf_remote_bash.py call that hit a PBS queue wait
+  # or a real build (the helper waits --timeout, default 1200s, for the remote
+  # result). 1320 = helper default + 2 min submission overhead, so a CLI
+  # remote-bash call is never killed before the helper itself gives up. Callers
+  # can still pass a smaller per-call timeout for quick local commands; the
+  # ceiling for larger values is TERMINAL_MAX_FOREGROUND_TIMEOUT (Dockerfile,
+  # 1800). Commands that finish early return immediately regardless.
+  timeout: 1320
+
 # Dashboard auth. A containerized dashboard reachable via `docker run -p` must
 # bind 0.0.0.0, and Hermes (correctly) refuses a non-loopback bind without an
 # auth gate. The entrypoint fills these from ALCF_DASHBOARD_USER /

@@ -95,11 +95,12 @@ will run OUTSIDE remote-bash, include those exports in it yourself.
 
 ## Timeouts — set BOTH, and check the queue before retrying
 
-1. The helper waits `--timeout` seconds (default 1200) for the result — but
-   **your `terminal` tool kills the whole CLI at ~180s by default**, which is
-   shorter than a cold start plus any queue wait. When calling this CLI through
-   `terminal`, ALWAYS set the terminal tool's own timeout parameter ≥ the
-   helper's `--timeout`. (The MCP `bash` tool manages this itself — prefer it.)
+1. The helper waits `--timeout` seconds (default 1200) for the result — and the
+   `terminal` tool has its OWN per-call timeout that can kill the CLI first.
+   This image's config default is 1320s (stock Hermes is 180s), so plain calls
+   are safe; if you pass a per-call terminal timeout, keep it ≥ the helper's
+   `--timeout`, and never lower it below a plausible cold start + queue wait.
+   (The MCP `bash` tool manages this itself — prefer it.)
 2. **A timeout usually means the PBS job is stuck in the queue, not that the
    command failed.** Resubmitting spawns ANOTHER queued job and pays another
    cold start. Instead check queue congestion first —

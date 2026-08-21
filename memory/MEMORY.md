@@ -256,12 +256,12 @@ Key facts:
 - Destructive-looking commands are refused unless `--yes` (CLI) / `confirm=true`
   (MCP tool) — confirm with the user first, always.
 - Quick status check any time: `/opt/hermes/.venv/bin/python /opt/alcf/alcf_remote_bash.py check`.
-- **Your `terminal` tool kills commands at ~180s by default** — a cold start or
-  a queued PBS job easily exceeds that, and the helper's own `--timeout`
-  (default 1200s) cannot save a call the terminal tool killed first. When
-  invoking the CLI through `terminal`, ALWAYS set the terminal tool's own
-  timeout parameter ≥ the helper `--timeout`. The MCP `bash` tool does not have
-  this problem — another reason to prefer it.
+- **Your `terminal` tool enforces its own per-call timeout**, separate from the
+  helper's `--timeout` (default 1200s) — if the terminal timeout is smaller,
+  the CLI is killed first and the result is lost. This image raises the config
+  default to 1320s (stock Hermes is 180s; ceiling 1800s), so plain calls are
+  safe — but if you pass a per-call terminal timeout, keep it ≥ the helper
+  `--timeout`. The MCP `bash` tool manages its own wait — prefer it.
 - **If a submission times out, DO NOT resubmit blindly.** The PBS job is almost
   certainly still sitting in the queue (each resubmit spawns ANOTHER queued
   job). Check first: `alcf_facility.py jobs --cluster polaris` (see the

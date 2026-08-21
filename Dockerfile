@@ -116,6 +116,13 @@ RUN printf '%s\n%s\n' "${ALCF_GIT_SHA}" "${ALCF_BUILD_DATE}" > /opt/alcf/.alcf_v
 #   ALCF_DELEGATION_MODEL   model for delegate_task subagents (default: the
 #                           launch model). Recommended for heavy build/test
 #                           sessions: google/gemma-4-26B-A4B-it (262k context).
+#   TERMINAL_MAX_FOREGROUND_TIMEOUT  Hermes terminal-tool ceiling (seconds) on a
+#                           per-call `timeout`. Stock Hermes caps it at 600,
+#                           which is shorter than a remote-bash cold start +
+#                           queue wait + build (helper --timeout default 1200).
+#                           1800 here lets both the config default below and a
+#                           model-requested long wait through. Must stay >= the
+#                           `terminal.timeout` in config.template.yaml.
 ENV ALCF_MODEL=google/gemma-4-31B-it \
     ALCF_CLUSTER=sophia \
     ALCF_MAX_TOKENS=2048 \
@@ -124,6 +131,7 @@ ENV ALCF_MODEL=google/gemma-4-31B-it \
     ALCF_DASHBOARD_INTERNAL_PORT=9119 \
     ALCF_ENABLE_IRI=1 \
     ALCF_ENABLE_GLOBUS_COMPUTE=1 \
+    TERMINAL_MAX_FOREGROUND_TIMEOUT=1800 \
     HERMES_HOME=/opt/data \
     XDG_DATA_HOME=/opt/data/.local/share \
     XDG_CONFIG_HOME=/opt/data/.config
