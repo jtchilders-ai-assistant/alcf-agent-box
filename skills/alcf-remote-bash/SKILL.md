@@ -18,15 +18,24 @@ test suite, etc. — not just read state.
 
 Reference: https://docs.alcf.anl.gov/services/globus-compute/
 
-## PREFER the `bash` MCP tool when it is in your toolset
+## RULE: if the `bash` tool is in your toolset, use IT — not the CLI
 
-If your tool list contains an MCP-provided **`bash`** tool (server `alcf-bash`),
-use THAT for compute-node commands instead of shelling out to this CLI. It is
-the same machinery underneath, but: one required argument (`command`), the
-account/queue/walltime already bound, ONE warm node held across your whole
-conversation, and the same persistent-shell state described below. Fall back to
-the CLI here when the MCP tool is absent or you need non-default
-endpoint/queue/walltime/venv per command.
+Check your tool list for an MCP-provided **`bash`** tool (server `alcf-bash`).
+If it is there, **every compute-node command in this skill goes through it**,
+NOT through `terminal` + the CLI. Same machinery underneath, but the tool holds
+**ONE warm node for your whole conversation** (the CLI can pay a multi-minute
+cold start and land on a different node on every call), manages its own result
+wait, and keeps the same persistent-shell state.
+
+    bash(command="module use /soft/modulefiles && module load spack-pe-base cmake && cmake --version",
+         account="datascience")     # account only needed ONCE — it sticks
+    bash(command="cd $HOME/myproj && cmake -B build && cmake --build build -j")
+
+If the server was started with `ALCF_BASH_ACCOUNT` set, you never pass account
+at all. Destructive-looking commands need `confirm=true` after user approval.
+
+Use the CLI below ONLY when the `bash` tool is absent from your toolset, or you
+genuinely need a non-default endpoint/queue/walltime/venv for one command.
 
 ## When to load this skill
 
@@ -109,7 +118,7 @@ will run OUTSIDE remote-bash, include those exports in it yourself.
    `--endpoint`, or tell the user. The killed command may still finish on the
    node; shared `--session` state will reflect it.
 
-## Running commands
+## Running commands (CLI fallback — only when the `bash` tool is absent)
 
     PY=/opt/hermes/.venv/bin/python
 
@@ -273,6 +282,30 @@ specific environment on the cluster filesystem:
 1. Run `check`. If disabled → tell the user it was turned off with
    `-e ALCF_ENABLE_GLOBUS_COMPUTE=0` (remove it to re-enable) and stop. If login
    missing → give the `authenticate` command to run on the host and stop.
-2. Confirm the command + `--account` with the user, especially anything that
+2. Confirm the command + account with the user, especially anything that
    writes or deletes files.
-3. Run it; report the compute node, exit code, and stdout/stderr plainly.
+3. For a multi-step build: as soon as the environment is known, create a resume
+   file on the cluster (`$HOME/agent-in-a-box/workspaces/<proj>/AGENT_STATE.md`:
+   module setup, what's done, next command) and UPDATE it after each completed
+   step — a restarted session must be able to resume from it.
+4. **Once the user approves the plan, CHAIN the steps — do not stop between
+   them.** Run step, read result, run next step, all in the SAME turn (the
+   `bash` tool / `batch` make consecutive calls ~1 s on the warm node). NEVER
+   end your turn with "Starting X now..." or "Next I will..." — an announced
+   step must be executed in that same turn. Only stop to ask the user something
+   they haven't already answered (e.g. approving a destructive/costly action),
+   or to report the final result.
+5. Report the compute node, exit code, and stdout/stderr plainly.
+
+## Small lessons that cost real time (learned in past sessions)
+
+- **autotools `./configure --prefix=` requires an ABSOLUTE path** — `--prefix=local`
+  fails with "expected an absolute directory name". (CMake resolves a relative
+  `-DCMAKE_INSTALL_PREFIX` against the build dir, so it won't error — but be
+  explicit there too.) Use `--prefix=$HOME/...` (single-quoted so it expands on
+  the node).
+- After ANY failed step, re-check whether the same mistake appears later in
+  your plan and fix those too (a relative-prefix error was once repeated on the
+  very next dependency).
+- A `git clone` that failed mid-batch may still have created the directory —
+  on retry, skip the clone or `rm -rf` it first (with user approval).

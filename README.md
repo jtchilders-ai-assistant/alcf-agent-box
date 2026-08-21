@@ -173,6 +173,7 @@ running config at container start. Environment variables you can override at
 | `ALCF_ENABLE_IRI` | `1` | Prompt for the second (IRI) Globus login |
 | `ALCF_ENABLE_METIS` | `1` | Include the Metis cluster's models in the switchable list |
 | `ALCF_SHOW_MODEL_STATUS` | `1` | Print the hot/cold model warm-up banner at startup |
+| `ALCF_BASH_ACCOUNT` | *(unset)* | **Recommended:** your default ALCF project for the compute-node `bash` tool. When set, the agent holds ONE warm compute node across the whole conversation instead of paying repeated cold starts; when unset, it must ask/look up a project first. |
 | `ALCF_NTFY_TOPIC` | *(unset)* | Secret [ntfy](https://ntfy.sh) topic for push notifications (see below) |
 | `ALCF_NTFY_SERVER` | `https://ntfy.sh` | Self-hosted ntfy relay, if you run one |
 

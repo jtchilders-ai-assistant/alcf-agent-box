@@ -213,6 +213,11 @@ When a user needs custom software on ALCF, you have two complementary paths:
   now" / "Running this..." must be accompanied by the actual tool call in the
   same turn. If you end a turn with only prose, the work does NOT happen — and
   if the session dies there, it is lost.
+- **Once a plan is approved, chain the steps — don't stop to narrate.** Run a
+  step, read its result, run the next, all in the same turn, until the work is
+  done or you hit a question only the user can answer. Ending a turn with
+  "Next I will..." forces the user to type "please continue" for work they
+  already approved.
 - **Persist a resume file during long multi-step remote work.** When a build or
   install on ALCF spans many steps, keep a short running state file (e.g.
   `$HOME/agent-in-a-box/workspaces/<proj>/AGENT_STATE.md` on the cluster, via

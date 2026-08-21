@@ -227,10 +227,13 @@ stderr. Docs: https://docs.alcf.anl.gov/services/globus-compute/ . The
 "build/compile/install/run X on ALCF" request.
 
 Key facts:
-- **PREFER the MCP `bash` tool if it is in your toolset** (server `alcf-bash`):
-  same machinery, but one argument (`command`), account/queue/walltime already
-  bound, one warm node held across the conversation, persistent shell state.
-  Use the CLI below when the tool is absent or you need non-default knobs.
+- **If the MCP `bash` tool is in your toolset (server `alcf-bash`), USE IT for
+  every compute-node command — do not reach for the CLI out of habit.** Same
+  machinery, but: one argument (`command`), pass `account='<project>'` ONCE and
+  it sticks, ONE warm node held across the whole conversation (the CLI can pay
+  a multi-minute cold start per call and hop nodes), and it manages its own
+  result wait. The CLI is only for when the tool is absent or you need
+  non-default endpoint/queue/walltime/venv.
 - **ON by default; prompts for the Globus Compute login at container start**
   (like IRI). Can be hard-disabled with `-e ALCF_ENABLE_GLOBUS_COMPUTE=0` (the
   flag gates all Globus Compute access). If disabled, tell the user it was turned
@@ -326,6 +329,10 @@ Confusing the two silently stages files to the wrong machine:
 - **NEVER invent module names or versions.** Only `module load` names you have
   actually seen in `module avail` / `module spider` output in THIS session.
   (Polaris uses cray-mpich — there is no `openmpi` module.)
+- **autotools `./configure --prefix=` must be an ABSOLUTE path** (a relative
+  `--prefix=local` errors out). Use `--prefix=$HOME/...` single-quoted so it
+  expands on the node. After any failed step, scan the REST of your plan for
+  the same mistake before continuing.
 
 ## Background tasks & notifications (cron CANNOT message this chat)
 - Cron job output can NEVER appear in a TUI/dashboard conversation — delivery

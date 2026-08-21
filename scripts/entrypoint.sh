@@ -298,6 +298,9 @@ mcp_servers:
 EOF
 )"
     log "MCP bash tool enabled (endpoint=${ALCF_BASH_ENDPOINT:-polaris}, account=${ALCF_BASH_ACCOUNT:-<unset — model asks/looks up>})"
+    if [[ -z "${ALCF_BASH_ACCOUNT:-}" ]]; then
+      log "TIP: set -e ALCF_BASH_ACCOUNT=<project> at docker run — the bash tool then charges that project by default and holds one warm compute node without asking."
+    fi
   else
     if [[ "${ALCF_ENABLE_GLOBUS_COMPUTE:-1}" == "0" || "${ALCF_ENABLE_MCP_BASH:-1}" == "0" ]]; then
       log "MCP bash tool disabled by env flag"
