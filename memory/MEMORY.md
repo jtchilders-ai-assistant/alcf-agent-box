@@ -327,6 +327,23 @@ Confusing the two silently stages files to the wrong machine:
   actually seen in `module avail` / `module spider` output in THIS session.
   (Polaris uses cray-mpich — there is no `openmpi` module.)
 
+## Background tasks & notifications (cron CANNOT message this chat)
+- Cron job output can NEVER appear in a TUI/dashboard conversation — delivery
+  goes only to gateway chat platforms (none configured by default) or to files
+  (`deliver: local` → `~/.hermes/cron/output/`). Never promise the user a
+  message "here" from a cron job.
+- For "watch X and then do Y": prefer a **self-continuing** cron job — it
+  checks the condition, and when met it DOES the next step itself (cron runs
+  are full agent sessions), reading/writing the persisted resume file — then
+  disables itself. Load the `alcf-background-tasks` skill for the full pattern.
+- **Never poll faster than every 5 min in agent mode** (tokens each run); use a
+  `--no-agent` script job for fast polls. Always give a watcher an end
+  condition and clean up stale jobs.
+- **Push notifications to the user's phone/desktop** are available via ntfy IF
+  `ALCF_NTFY_TOPIC` is set: `/opt/hermes/.venv/bin/python
+  /opt/alcf/alcf_notify.py send "..."` (`check` tells you if configured).
+  Status-level facts only — never tokens/secrets/file contents.
+
 ## ALCF systems (orientation)
 - Polaris, Aurora, Crux — HPC clusters, jobs run under PBS.
 - Sophia — NVIDIA DGX A100 cluster; also hosts inference.

@@ -85,11 +85,12 @@ COPY scripts/alcf_remote_bash.py /opt/alcf/alcf_remote_bash.py
 COPY scripts/alcf_bash_mcp.py /opt/alcf/alcf_bash_mcp.py
 COPY scripts/resolve_context_length.py /opt/alcf/resolve_context_length.py
 COPY scripts/populate_models.py /opt/alcf/populate_models.py
+COPY scripts/alcf_notify.py /opt/alcf/alcf_notify.py
 RUN chmod +x /opt/alcf/entrypoint.sh /opt/alcf/alcf_combined_auth.py \
              /opt/alcf/inference_auth_token.py \
              /opt/alcf/alcf_facility_api_globus_token.py /opt/alcf/iri_hello_world.py \
              /opt/alcf/alcf_facility.py /opt/alcf/alcf_remote_bash.py \
-             /opt/alcf/alcf_bash_mcp.py \
+             /opt/alcf/alcf_bash_mcp.py /opt/alcf/alcf_notify.py \
              /opt/alcf/resolve_context_length.py /opt/alcf/populate_models.py \
     && chown -R hermes:hermes /opt/alcf
 
@@ -113,6 +114,10 @@ RUN printf '%s\n%s\n' "${ALCF_GIT_SHA}" "${ALCF_BUILD_DATE}" > /opt/alcf/.alcf_v
 #                           the model asks for / looks up one and it sticks)
 #   ALCF_BASH_ENDPOINT/QUEUE/WALLTIME/TIMEOUT/MAX_OUTPUT  MCP bash tuning
 #   ALCF_ENABLE_MCP_BASH=0  drop the MCP bash tool from the config
+#   ALCF_NTFY_TOPIC         secret ntfy topic for push notifications (job
+#                           done/started alerts to the user's phone/desktop —
+#                           cron output cannot reach the TUI/dashboard chat).
+#                           Optional ALCF_NTFY_SERVER for a self-hosted relay.
 #   ALCF_DELEGATION_MODEL   model for delegate_task subagents (default: the
 #                           launch model). Recommended for heavy build/test
 #                           sessions: google/gemma-4-26B-A4B-it (262k context).

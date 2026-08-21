@@ -173,6 +173,21 @@ running config at container start. Environment variables you can override at
 | `ALCF_ENABLE_IRI` | `1` | Prompt for the second (IRI) Globus login |
 | `ALCF_ENABLE_METIS` | `1` | Include the Metis cluster's models in the switchable list |
 | `ALCF_SHOW_MODEL_STATUS` | `1` | Print the hot/cold model warm-up banner at startup |
+| `ALCF_NTFY_TOPIC` | *(unset)* | Secret [ntfy](https://ntfy.sh) topic for push notifications (see below) |
+| `ALCF_NTFY_SERVER` | `https://ntfy.sh` | Self-hosted ntfy relay, if you run one |
+
+### Push notifications (ntfy)
+
+The chat surfaces (dashboard, TUI) are *pull* interfaces — a scheduled/cron job
+or a long build finishing in the background cannot message you there. If you
+want real "job started / build done" alerts on your phone or desktop, enable
+[ntfy](https://ntfy.sh): pick a hard-to-guess topic name (it acts as a
+password), subscribe to it in the ntfy app (or open `https://ntfy.sh/<topic>`),
+and start the container with `-e ALCF_NTFY_TOPIC=<topic>`. The agent then uses
+the baked `/opt/alcf/alcf_notify.py` helper (and its `alcf-background-tasks`
+skill) to push status-level alerts — job ids, states, exit codes — never
+tokens or file contents. Self-hosting ntfy? Point `ALCF_NTFY_SERVER` at your
+relay.
 
 ## What happens at container start
 
