@@ -289,6 +289,21 @@ mcp_servers:
   alcf-bash:
     command: "/opt/hermes/.venv/bin/python"
     args: ["/opt/alcf/alcf_bash_mcp.py"]
+    # Hermes-side (CLIENT) timeouts. These are SEPARATE from ALCF_BASH_TIMEOUT
+    # below, which is the server's own per-command budget. Hermes defaults to a
+    # 300s tool-call timeout, so without this a command that the server is
+    # happily waiting 1200s for is killed by the client at 300s and the model
+    # gets a bare TimeoutError with no result. Keep timeout > ALCF_BASH_TIMEOUT
+    # so the server's own error (which explains what happened) always wins.
+    timeout: $(( ${ALCF_BASH_TIMEOUT:-1200} + 120 ))
+    connect_timeout: 60
+    # Hermes pings idle MCP servers to detect stale sessions. This server is
+    # single-threaded stdio: while a bash command is in flight it CANNOT answer
+    # a ping, so a keepalive landing mid-command reads as a dead session,
+    # triggers a reconnect and kills the in-flight call. At the stock 180s
+    # cadence that fires during essentially every real build. Push the cadence
+    # past the call budget so pings only ever land while genuinely idle.
+    keepalive_interval: $(( ${ALCF_BASH_TIMEOUT:-1200} + 180 ))
     env:
       ALCF_BASH_ACCOUNT: "${ALCF_BASH_ACCOUNT:-}"
       ALCF_BASH_ENDPOINT: "${ALCF_BASH_ENDPOINT:-polaris}"

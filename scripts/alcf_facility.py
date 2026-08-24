@@ -126,13 +126,35 @@ def cmd_jobs(args) -> int:
     if args.json:
         print(json.dumps(resp, indent=2))
         return 0
+
+    # An API error is NOT an empty job list. Check this BEFORE the empty-list
+    # branch: on a 401 the old code printed "No jobs found ..." and exited 0,
+    # which reads as "your queue is empty" — a false negative that sent the
+    # agent (and the user) looking for a nonexistent scheduling problem when
+    # the real issue was an expired Globus token.
+    if isinstance(resp, dict) and resp.get("error"):
+        status = resp.get("http_status")
+        label = {401: "AUTH FAILED", 403: "FORBIDDEN"}.get(status, "API ERROR") \
+            if isinstance(status, int) else "API ERROR"
+        print(f"{label}: could not read jobs on {args.cluster} "
+              f"(HTTP {status or '?'}). Job state is UNKNOWN — this is not an "
+              "empty queue.", file=sys.stderr)
+        print(f"  {resp['error']}", file=sys.stderr)
+        if status == 401:
+            print("\nThe IRI/facility API uses a 48h high-assurance Globus "
+                  "token, separate from the inference and Globus Compute "
+                  "logins. Re-authenticate:\n"
+                  "  1. Log out at https://app.globus.org/logout (incognito "
+                  "window or cleared cache)\n"
+                  "  2. Authenticate with the alcf.anl.gov identity provider\n"
+                  "  3. Re-run: alcf_facility_api_globus_token.py authenticate",
+                  file=sys.stderr)
+        return 4
+
     jobs = resp if isinstance(resp, list) else resp.get("jobs") or resp.get("data") or []
     if not jobs:
         print(f"No jobs found on {args.cluster} "
               f"({'incl. finished' if args.historical else 'active only'}).")
-        # surface an API error if that's why it's empty
-        if isinstance(resp, dict) and resp.get("error"):
-            print(f"  (API said: {str(resp['error'])[:200]})", file=sys.stderr)
         return 0
     # Real shape (verified 2026-07-31): each job = {"id": "<pbsid>.polaris-...",
     # "status": {"state": "...", "exit_code": N}}. Fall back gracefully if the

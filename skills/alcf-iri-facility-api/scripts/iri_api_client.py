@@ -68,7 +68,13 @@ class IRI:
                 raw = r.read().decode()
                 return r.status, (json.loads(raw) if raw else {})
         except urllib.error.HTTPError as e:
-            return e.code, {"error": e.read().decode()[:500]}
+            # Do NOT truncate the body. ALCF auth errors put the actionable half
+            # LAST ("...re-authenticate at https://app.globus.org/logout, use an
+            # incognito window, authenticate with alcf.anl.gov"), so a head-slice
+            # reliably cuts off the only part that tells you how to recover.
+            # `http_status` is carried in-band so callers that only take the body
+            # (job_statuses et al.) can still distinguish "empty" from "failed".
+            return e.code, {"error": e.read().decode(), "http_status": e.code}
 
     # ---- no-auth status ----
     def resources(self):

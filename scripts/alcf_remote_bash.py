@@ -176,6 +176,57 @@ def _refuse_container_paths(cmd: str) -> None:
     )
 
 
+# PBS *client* commands. remote-bash runs your command INSIDE an already-running
+# PBS job on a compute node, and compute nodes do not run the PBS client — there
+# is no scheduler to talk to. Calling `qsub` here means "submit a PBS job from
+# inside a PBS job", which is the execution-locus mistake this guard exists to
+# stop: it either fails obscurely or, worse, consumes another queue slot.
+#
+# Job submission/status/cancel belongs to the IRI facility API
+# (POST /compute/job/{resource}, GET /compute/status/..., DELETE /compute/cancel/...)
+# — see the alcf-iri-facility-api skill. This is a hard refusal with no override
+# flag on purpose: there is no correct way to reach these through remote-bash.
+_PBS_CLIENT_CMDS = ("qsub", "qstat", "qdel", "qalter", "qhold", "qrls", "qmove")
+
+# Match only a real command token: start of string / after a shell separator
+# (; && || | & newline) / after `sudo`, so `echo "run qsub later"` and paths
+# like /home/u/qsub_scripts/ don't trip it.
+_PBS_CLIENT_RE = re.compile(
+    r"(?:^|[;&|]|\bsudo\s+|\n)\s*(" + "|".join(_PBS_CLIENT_CMDS) + r")\b"
+)
+
+
+def _pbs_client_refs(cmd: str) -> list[str]:
+    """Return PBS client commands invoked as actual commands in *cmd*."""
+    return sorted({m.group(1) for m in _PBS_CLIENT_RE.finditer(cmd)})
+
+
+def _pbs_guard_message(cmd: str, hits: list[str]) -> str:
+    return (
+        f"REFUSED: command invokes PBS client command(s) {hits}, which do NOT "
+        "run on a compute node.\n"
+        f"  cmd: {cmd}\n"
+        "THREE MACHINES — remote-bash (Globus Compute) only reaches the third:\n"
+        "  1. agent container  — your `terminal`/`read_file`/`write_file` tools\n"
+        "  2. PBS scheduler    — job submit/status/cancel, via the IRI facility API\n"
+        "  3. compute node     — THIS command's target: build, compile, run\n"
+        "Your command is already running inside a PBS job on a compute node, so "
+        "there is no scheduler to talk to; qsub here would try to submit a job "
+        "from inside a job and need a SECOND queue slot — which the debug "
+        "queue's ~1 running + 1 queued per-user cap does not give you, since "
+        "this call already holds your slot.\n"
+        "Use the IRI facility API instead (skill: alcf-iri-facility-api):\n"
+        "  submit  POST   /compute/job/{resource_id}\n"
+        "  status  GET    /compute/status/{resource_id}/{job_id}?historical=true\n"
+        "  cancel  DELETE /compute/cancel/{resource_id}/{job_id}\n"
+        "There is no override flag — remote-bash cannot reach the scheduler."
+    )
+
+
+def _refuse_pbs_client(cmd: str, hits: list[str]) -> None:
+    print(_pbs_guard_message(cmd, hits), file=sys.stderr)
+
+
 def remote_bash(command: str, run_dir: str = "$HOME", venv: str = "",
                 session: str = "", fresh: bool = False,
                 max_output: int = 20000, result_limit: int = 9_500_000,
@@ -486,7 +537,54 @@ def _print_result(rc, out, err, host, dt, as_json, meta=None):
     print("=" * 60)
 
 
+def _explain_launch_failure(exc_text: str) -> str | None:
+    """Recognise a PBS queue-limit rejection of the ENDPOINT's own block.
+
+    Globus Compute runs your command inside a PBS job that the endpoint
+    submits for you (Parsl calls it a "block"). When that qsub is rejected for
+    exceeding a per-user job limit, the failing qsub is the ENDPOINT's, not
+    anything the agent typed — a distinction that is easy to get backwards,
+    because the rejected command appears in the traceback and looks like a
+    user action. Reported as one's own doing it sends you hunting for a
+    phantom job you never submitted.
+    """
+    if "per-user limit" not in exc_text and "per-project limit" not in exc_text:
+        return None
+    state = "Q (queued)" if "'Q' state" in exc_text else "R (running)"
+    return (
+        "[remote-bash] WHAT THIS MEANS: the rejected `qsub` is the Globus "
+        "Compute ENDPOINT's own job submission, not a command you ran. To give "
+        "you a compute node, the endpoint must submit a PBS job (a Parsl "
+        f"'block'); PBS refused it because your jobs in {state} are already at "
+        "the queue's per-user limit.\n"
+        "[remote-bash] The debug queue's limit is small (on the order of one "
+        "running + one queued job per user), so a SINGLE leftover block is "
+        "enough to block every subsequent call.\n"
+        "[remote-bash] Most likely cause: an earlier remote-bash/MCP call that "
+        "timed out CLIENT-side. The client gave up, but the PBS job it "
+        "requested stayed queued and still holds your slot.\n"
+        "[remote-bash] To fix, free the slot (do NOT re-run — it will be "
+        "refused again):\n"
+        "  1. list your jobs   alcf_facility.py jobs --cluster polaris\n"
+        "  2. cancel the stale one via the IRI API:\n"
+        "       DELETE /compute/cancel/{resource_id}/{job_id}\n"
+        "     (skill: alcf-iri-facility-api — `qdel` is a login-node command "
+        "and is NOT available from here)\n"
+        "  3. or simply wait for the queued block to start and time out on its "
+        "own walltime."
+    )
+
+
+
 def cmd_run(args) -> int:
+    # PBS guard runs BEFORE preflight: it needs no SDK, no token and no
+    # network, and its message is far more actionable than the unrelated
+    # "globus-compute-sdk not importable" / "not authenticated" bail that
+    # preflight would otherwise emit first.
+    pbs_hits = _pbs_client_refs(args.cmd)
+    if pbs_hits:
+        _refuse_pbs_client(args.cmd, pbs_hits)
+        return 8
     bail = _preflight_run(args)
     if bail is not None:
         return bail
@@ -535,9 +633,13 @@ def cmd_run(args) -> int:
     except Exception as exc:
         print(f"\n[remote-bash] submission/result FAILED: {type(exc).__name__}: {exc}",
               file=sys.stderr)
-        print("[remote-bash] Common causes: bad account/queue, endpoint warming up "
-              "(retry), or a serialization/env mismatch. If jobs loop-fail, clean up "
-              "on the cluster: `rm ~/.globus_compute/*/daemon.pid`.", file=sys.stderr)
+        explained = _explain_launch_failure(str(exc))
+        if explained:
+            print(explained, file=sys.stderr)
+        else:
+            print("[remote-bash] Common causes: bad account/queue, endpoint warming up "
+                  "(retry), or a serialization/env mismatch. If jobs loop-fail, clean up "
+                  "on the cluster: `rm ~/.globus_compute/*/daemon.pid`.", file=sys.stderr)
         return 6
     dt = time.time() - t0
 
@@ -570,12 +672,9 @@ def cmd_batch(args) -> int:
     First command pays cold start; the rest reuse the same warm node. Stops on
     the first non-zero exit unless --keep-going. Emits a per-command summary.
     """
-    bail = _preflight_run(args)
-    if bail is not None:
-        return bail
-    from globus_compute_sdk import Executor
-    from globus_compute_sdk.serialize import AllCodeStrategies, ComputeSerializer
-
+    # Load commands and run the PBS guard BEFORE preflight — a pure string
+    # check needs no SDK/token, and its message beats an unrelated preflight
+    # bail. (Same rationale as cmd_run.)
     cmds = _load_cmds(args)
     if cmds is None:
         return 3
@@ -583,6 +682,17 @@ def cmd_batch(args) -> int:
         print("ERROR: no commands given (use --cmds-file or one/more --cmd).",
               file=sys.stderr)
         return 3
+    for c in cmds:
+        pbs_hits = _pbs_client_refs(c)
+        if pbs_hits:
+            _refuse_pbs_client(c, pbs_hits)
+            return 8
+
+    bail = _preflight_run(args)
+    if bail is not None:
+        return bail
+    from globus_compute_sdk import Executor
+    from globus_compute_sdk.serialize import AllCodeStrategies, ComputeSerializer
 
     # Safety gate across the whole batch.
     if not args.yes:
@@ -648,8 +758,12 @@ def cmd_batch(args) -> int:
     except Exception as exc:
         print(f"\n[remote-bash] batch FAILED: {type(exc).__name__}: {exc}",
               file=sys.stderr)
-        print("[remote-bash] If jobs loop-fail, clean up on the cluster: "
-              "`rm ~/.globus_compute/*/daemon.pid`.", file=sys.stderr)
+        explained = _explain_launch_failure(str(exc))
+        if explained:
+            print(explained, file=sys.stderr)
+        else:
+            print("[remote-bash] If jobs loop-fail, clean up on the cluster: "
+                  "`rm ~/.globus_compute/*/daemon.pid`.", file=sys.stderr)
         return 6
 
     print(f"\n[remote-bash] batch done: "
