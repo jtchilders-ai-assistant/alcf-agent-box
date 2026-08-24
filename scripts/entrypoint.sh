@@ -118,12 +118,14 @@ render_config() {
   log "Model context window: $ctxlen tokens (from max_model_len; see /tmp/ctxlen.log)"
 
   # Generate the switchable-model `custom_providers:` block from the LIVE ALCF
-  # catalog on BOTH clusters (sophia + metis). populate_models.py filters to chat
-  # models and assigns each its real serving context window; it always prints a
-  # valid block (committed static fallback on any discovery failure), so this is
-  # never fatal. ALCF_ENABLE_METIS=0 drops the Metis provider.
+  # catalog on every serving cluster (sophia + metis + minerva). populate_models.py
+  # filters to chat models and assigns each its real serving context window; it
+  # always prints a valid block (committed static fallback on any discovery
+  # failure), so this is never fatal. ALCF_ENABLE_METIS=0 / ALCF_ENABLE_MINERVA=0
+  # drop those providers.
   providers_block="$(ALCF_INFER_AUTH="$INFER_AUTH" ALCF_PY="$PY" \
             ALCF_ENABLE_METIS="${ALCF_ENABLE_METIS:-1}" \
+            ALCF_ENABLE_MINERVA="${ALCF_ENABLE_MINERVA:-1}" \
             ALCF_MAX_TOKENS="${ALCF_MAX_TOKENS:-2048}" \
             ALCF_REASONING_MAX_TOKENS="${ALCF_REASONING_MAX_TOKENS:-12288}" \
             "$PY" "$ALCF_DIR/populate_models.py" 2>>/tmp/populate_models.log)"
@@ -357,17 +359,20 @@ PYEOF
 render_config
 log "Config rendered -> $CONFIG_OUT (cluster=$ALCF_CLUSTER model=${ALCF_MODEL:-google/gemma-4-31B-it})"
 
-# --- 4b. Model warm-up (hot/cold) status banner -----------------------------
+# --- 4b. Model availability status banner ------------------------------------
 # The model dropdown lists the full ALCF catalog, but ALCF only keeps a subset
-# loaded on GPU at any time. Selecting a "cold" model triggers a 10-15 min load
-# and returns HTTP 503 "online but not ready" in the meantime -- which looks
-# like a failure but is just warm-up. Print which offered models are hot now so
-# the user can pick an instant one or know to wait. Purely informational and
-# best-effort: never fatal (|| true), and the script itself reports "unknown"
+# loaded on GPU at any time. populate_models.py --status-report classifies every
+# OFFERED model as LIVE / QUEUED / OFFLINE against the live <cluster>/jobs state
+# and annotates each with its context window, so the user can pick an instant
+# model, see a queued model's real estimated start (which can be HOURS, not the
+# ~10-15 min GPU warm-up), or know a cluster is simply down. Purely informational
+# and best-effort: never fatal (|| true), and the script itself reports "unknown"
 # rather than guessing if /jobs is unreachable.
 if [ "${ALCF_SHOW_MODEL_STATUS:-1}" != "0" ]; then
   ALCF_INFER_AUTH="$INFER_AUTH" ALCF_PY="$PY" \
-    "$PY" "$ALCF_DIR/populate_models.py" --hot-report 2>>/tmp/populate_models.log \
+    ALCF_ENABLE_METIS="${ALCF_ENABLE_METIS:-1}" \
+    ALCF_ENABLE_MINERVA="${ALCF_ENABLE_MINERVA:-1}" \
+    "$PY" "$ALCF_DIR/populate_models.py" --status-report 2>>/tmp/populate_models.log \
     | while IFS= read -r line; do log "$line"; done || true
 fi
 
