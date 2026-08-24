@@ -157,12 +157,23 @@ class BashSession:
             f"~1 s. Output beyond ~{self.max_output} bytes is returned "
             "head+tail with the full log saved on the node (path shown in the "
             "truncation marker) — grep/tail that file in a follow-up command "
-            "instead of re-running."
+            "instead of re-running. "
+            "SCOPE: this runs INSIDE an already-running PBS job on a compute "
+            "node — use it to build, compile, install and run software. It is "
+            "NOT the scheduler: qsub/qstat/qdel do not work here and are "
+            "refused. To submit, check or cancel a JOB, use the IRI facility "
+            "API (skill: alcf-iri-facility-api). Your `terminal` tool is a "
+            "third, separate machine (the agent container) and shares no "
+            "filesystem with the cluster."
         )
         props = {
             "command": {
                 "type": "string",
-                "description": "The bash command to run on the compute node.",
+                "description": (
+                    "The bash command to run on the compute node. Build/run "
+                    "work only — PBS client commands (qsub/qstat/qdel) are "
+                    "refused; submit jobs via the IRI facility API instead."
+                ),
             },
             "account": {
                 "type": "string",
@@ -254,10 +265,28 @@ def handle_call(session: BashSession, args: dict) -> dict:
             "confirm=true.",
             is_error=True)
 
+    # PBS client commands cannot work here: this tool runs INSIDE a PBS job on a
+    # compute node, which has no scheduler to talk to. Refused unconditionally —
+    # `confirm` does NOT override it, because there is no correct way to reach
+    # the scheduler through this tool (see alcf_remote_bash._PBS_CLIENT_CMDS).
+    pbs_hits = rb._pbs_client_refs(command)
+    if pbs_hits:
+        return _text_result(rb._pbs_guard_message(command, pbs_hits),
+                            is_error=True)
+
     t0 = time.time()
     try:
         rc, out, err, host, meta = session.run(command)
     except Exception as exc:
+        explained = rb._explain_launch_failure(str(exc))
+        if explained:
+            # Strip the CLI's "[remote-bash] " line prefixes for MCP output.
+            explained = "\n".join(
+                ln.replace("[remote-bash] ", "", 1) for ln in explained.split("\n"))
+            return _text_result(
+                f"submission/result FAILED: {type(exc).__name__}: {exc}\n\n"
+                f"{explained}",
+                is_error=True)
         return _text_result(
             f"submission/result FAILED: {type(exc).__name__}: {exc}. Common "
             "causes: bad account/queue, endpoint warming up (retry once), or a "

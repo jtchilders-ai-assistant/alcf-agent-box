@@ -146,6 +146,117 @@ class DestructiveGateTests(unittest.TestCase):
             self.assertIsNone(rb._looks_destructive(cmd), cmd)
 
 
+class QueueLimitExplainerTests(unittest.TestCase):
+    """A per-user queue-limit rejection refers to the ENDPOINT's own PBS block,
+    not to anything the agent submitted. Verbatim traceback from the live
+    session that got this backwards."""
+
+    REAL = (
+        "TaskExecutionFailed: parsl.executors.errors.BadStateException: Executor "
+        "GlobusComputeEngine-HighThroughputExecutor failed due to: Error 1:\n"
+        "\tFailed to start block 0: Cannot launch job parsl.GlobusComputeEngine-"
+        "HighThroughputExecutor.block-0.1787578168.8697793: Submit command "
+        "'qsub  -q debug -A datascience /home/parton/.globus_compute/uep.9a947ba5/"
+        "submit_scripts/parsl...block-0' failed; recode=None, stdout=, "
+        "stderr=qsub: would exceed queue generic's per-user limit of jobs in "
+        "'Q' state"
+    )
+
+    def test_recognised(self):
+        self.assertIsNotNone(rb._explain_launch_failure(self.REAL))
+
+    def test_attributes_the_qsub_to_the_endpoint(self):
+        msg = rb._explain_launch_failure(self.REAL)
+        self.assertIn("ENDPOINT", msg)
+        self.assertIn("not a command you ran", msg)
+
+    def test_names_the_debug_queue_limit_and_the_stale_block_cause(self):
+        msg = rb._explain_launch_failure(self.REAL)
+        self.assertIn("one running + one queued", msg)
+        self.assertIn("timed out", msg)   # the actual root cause
+        self.assertIn("still holds your slot", msg)
+
+    def test_routes_cancellation_to_iri_not_qdel(self):
+        msg = rb._explain_launch_failure(self.REAL)
+        self.assertIn("/compute/cancel/", msg)
+        self.assertIn("NOT available from here", msg)  # re: qdel
+
+    def test_tells_the_agent_not_to_retry(self):
+        # The looping retry is what burned the session; the guidance must be explicit.
+        self.assertIn("do NOT re-run", rb._explain_launch_failure(self.REAL))
+
+    def test_reports_the_state_that_was_exceeded(self):
+        self.assertIn("Q (queued)", rb._explain_launch_failure(self.REAL))
+        running = self.REAL.replace("'Q' state", "'R' state")
+        self.assertIn("R (running)", rb._explain_launch_failure(running))
+
+    def test_per_project_limit_also_recognised(self):
+        self.assertIsNotNone(rb._explain_launch_failure(
+            "stderr=qsub: would exceed queue prod's per-project limit"))
+
+    def test_unrelated_failures_fall_through_to_generic_advice(self):
+        for other in ("TimeoutError: result timeout after 1200s",
+                      "SerializationError: cannot serialize function",
+                      "EndpointNotFound: no such endpoint",
+                      ""):
+            self.assertIsNone(rb._explain_launch_failure(other), other)
+
+
+class PbsClientGuardTests(unittest.TestCase):
+    """PBS client commands cannot work on a compute node — remote-bash runs
+    INSIDE a PBS job, where there is no scheduler to talk to. Guard must catch
+    real invocations without tripping on incidental substrings."""
+
+    def test_flags_pbs_client_commands(self):
+        cases = {
+            "qsub $HOME/run.pbs": ["qsub"],
+            "qstat -u parton": ["qstat"],
+            "qdel 12345": ["qdel"],
+            "qalter -l walltime=1:00:00 123": ["qalter"],
+            "qhold 1": ["qhold"],
+            "qrls 1": ["qrls"],
+            "qmove debug 1": ["qmove"],
+            # after shell separators
+            "cd $HOME && qsub run.pbs": ["qsub"],
+            "module load x; qstat": ["qstat"],
+            "cat f | qsub": ["qsub"],
+            "false || qsub run.pbs": ["qsub"],
+            "sudo qdel 1": ["qdel"],
+            # multiline scripts
+            "cd $HOME\nqsub run.pbs": ["qsub"],
+            # several at once, deduped + sorted
+            "qsub a.pbs && qstat && qsub b.pbs": ["qstat", "qsub"],
+        }
+        for cmd, expected in cases.items():
+            self.assertEqual(rb._pbs_client_refs(cmd), expected, cmd)
+
+    def test_does_not_trip_on_incidental_mentions(self):
+        for cmd in (
+            # the word inside a quoted string / message
+            'echo "run qsub later"',
+            "printf 'use qstat to check\\n' > README",
+            # substring of a longer token
+            "ls $HOME/qsub_scripts/",
+            "cat qstat_output.txt",
+            "./qsubmit_helper.sh",
+            "python qdel_wrapper.py",
+            # normal build work
+            "cmake --build build -j",
+            "module load spack-pe-base cmake && make install",
+        ):
+            self.assertEqual(rb._pbs_client_refs(cmd), [], cmd)
+
+    def test_guard_message_names_the_three_machines_and_iri(self):
+        msg = rb._pbs_guard_message("qsub run.pbs", ["qsub"])
+        self.assertIn("REFUSED", msg)
+        self.assertIn("compute node", msg)
+        self.assertIn("agent container", msg)
+        self.assertIn("PBS scheduler", msg)
+        self.assertIn("/compute/job/", msg)      # IRI submit route
+        self.assertIn("/compute/cancel/", msg)   # IRI cancel route
+        self.assertIn("no override flag", msg.lower())
+
+
 class ContainerPathGuardTests(unittest.TestCase):
     def test_flags_container_only_paths(self):
         for cmd in ("cd /opt/data/pepper && make",
@@ -297,6 +408,24 @@ class McpServerTests(_FakeHomeMixin):
             {"command": "rm -rf /tmp/alcf_mcp_nonexistent_dir", "confirm": True})
         self.assertFalse(is_err, text)
         self.assertIn("[exit 0", text)
+
+        # PBS client commands are refused, and confirm=true does NOT override
+        # (unlike the destructive gate) — there is no correct way to reach the
+        # scheduler from a compute node.
+        is_err, text = self._call_bash({"command": "qsub $HOME/run_test.pbs"})
+        self.assertTrue(is_err)
+        self.assertIn("REFUSED", text)
+        self.assertIn("qsub", text)
+        self.assertIn("/compute/job/", text)  # points at the IRI submit route
+        is_err, text = self._call_bash(
+            {"command": "qsub $HOME/run_test.pbs", "confirm": True})
+        self.assertTrue(is_err, "confirm must NOT bypass the PBS guard")
+        self.assertIn("REFUSED", text)
+
+        # ...but a build command that merely mentions qsub in a string is fine
+        is_err, text = self._call_bash({"command": 'echo "run qsub later"'})
+        self.assertFalse(is_err, text)
+        self.assertIn("run qsub later", text)
 
         # bad requests
         is_err, text = self._call_bash({})

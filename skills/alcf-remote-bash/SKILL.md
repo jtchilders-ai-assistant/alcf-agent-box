@@ -45,9 +45,10 @@ my environment on Crux", "build an apptainer container on ALCF", "run my test
 suite on a Polaris node".
 
 For read-only "state of my work" questions (is X up, my jobs, my allocations),
-use `alcf-facility-status-and-jobs` instead. For submitting a *batch* PBS script
-and polling it, the IRI job-submission path (`alcf-iri-facility-api`) is the
-right tool. remote-bash is for **synchronous, interactive** build/run commands.
+use `alcf-facility-status-and-jobs` instead. For **submitting a batch PBS job**
+(anything you would reach for `qsub` to do) use the IRI job-submission path
+(`alcf-iri-facility-api`) — `qsub` is REFUSED here, see THE THREE MACHINES
+below. remote-bash is for **synchronous, interactive** build/run commands.
 
 ## IMPORTANT — this is opt-in and gated
 
@@ -76,11 +77,62 @@ remote-bash runs **arbitrary code on ALCF charged to the user's allocation**, so
     #   docker exec -it <container> /opt/hermes/.venv/bin/python \
     #     /opt/alcf/alcf_remote_bash.py authenticate
 
-## THE TWO MACHINES — container vs cluster (read this first)
+## THE THREE MACHINES — read this first
 
-Your `terminal` / `write_file` / `read_file` tools act on the **agent
-container**; ONLY the `--cmd` string runs on the **cluster**. The two share no
-filesystem:
+There are THREE places a command can run. Picking the wrong one is the most
+common failure in this environment, and two of them are NOT reachable from
+this skill.
+
+| # | Machine | Reached by | Use it for |
+|---|---------|-----------|------------|
+| 1 | **agent container** | `terminal`, `read_file`, `write_file` | editing local files, running the CLI helpers themselves |
+| 2 | **PBS scheduler** | **IRI facility API** (skill: `alcf-iri-facility-api`) | `qsub`/`qstat`/`qdel` equivalents — submit, check, cancel JOBS |
+| 3 | **compute node** | **Globus Compute** — this skill (`bash` tool / `alcf_remote_bash.py`) | build, compile, `pip install`, run tests, run your code |
+
+The three rules that follow from this:
+
+- **Globus Compute commands run on a COMPUTE NODE.** Everything in this skill —
+  the MCP `bash` tool and `alcf_remote_bash.py run|batch` — lands inside an
+  already-running PBS job on a compute node.
+- **IRI is for submitting jobs.** Job submit/status/cancel goes through the IRI
+  facility API, never through this skill:
+  - submit — `POST /compute/job/{resource_id}`
+  - status — `GET /compute/status/{resource_id}/{job_id}?historical=true`
+  - cancel — `DELETE /compute/cancel/{resource_id}/{job_id}`
+- **PBS commands do NOT run on compute nodes.** `qsub`, `qstat`, `qdel`,
+  `qalter`, `qhold`, `qrls`, `qmove` are refused by both the `bash` tool and the
+  CLI (exit 8), with **no override flag**. Your command is already running
+  inside a PBS job; there is no scheduler there to talk to, and `qsub` would try
+  to submit a job from inside a job and consume another queue slot. If you want
+  a batch job to run, submit it via IRI (machine 2) — do not try to route it
+  through here.
+
+### Your queue budget is ONE job — the warm node IS that job
+
+Every call in this skill runs inside a PBS job the endpoint submits on your
+behalf (a Parsl "block"). On Polaris's `debug` queue a user gets roughly **one
+running + one queued job**, so:
+
+- **The warm node is your whole budget.** While remote-bash holds a node, you
+  have no room for a second job. Reuse the warm session (`batch`, or successive
+  calls with the same `--session`) instead of starting parallel work.
+- **A timed-out call does NOT release the slot.** If the client gives up, the
+  PBS job it requested stays queued and keeps holding your slot — this is the
+  usual reason a later call dies with:
+
+      qsub: would exceed queue generic's per-user limit of jobs in 'Q' state
+
+  That rejected `qsub` is the **endpoint's**, not yours. Do not go looking for a
+  job you submitted, and do not retry — it will be refused again. Free the slot
+  first (`alcf_facility.py jobs --cluster polaris`, then IRI
+  `DELETE /compute/cancel/{resource_id}/{job_id}`), or wait for the stale block
+  to start and hit its own walltime.
+- This is also why `qsub`-ing your own script from here is doubly wrong: it
+  needs a *second* slot you do not have. Submit via IRI instead.
+
+### Container vs cluster filesystem
+
+Machines 1 and 3 share no filesystem:
 
 - Container `$HOME` = `/opt/data`. Cluster `$HOME` = `/home/<username>`.
   `/opt/data`, `/opt/hermes`, `/opt/alcf` do NOT exist on any ALCF node.
@@ -112,7 +164,10 @@ will run OUTSIDE remote-bash, include those exports in it yourself.
    (The MCP `bash` tool manages this itself — prefer it.)
 2. **A timeout usually means the PBS job is stuck in the queue, not that the
    command failed.** Resubmitting spawns ANOTHER queued job and pays another
-   cold start. Instead check queue congestion first —
+   cold start — and with a ~1 running + 1 queued per-user cap on `debug`, the
+   stale block from the timed-out call is probably already holding your only
+   slot, so the retry gets rejected outright (see the queue-budget section
+   above). Instead check queue congestion first —
    `/opt/hermes/.venv/bin/python /opt/alcf/alcf_facility.py jobs --cluster
    polaris` (see `alcf-facility-status-and-jobs`) — then wait, switch
    `--endpoint`, or tell the user. The killed command may still finish on the
