@@ -106,9 +106,12 @@ Order of operations in `render_config()` (re-run by the 6h token-refresh loop):
 6. **Splice + substitute.** The generated block replaces the sentinel-to-EOF
    region of `config.template.yaml`, then `${VAR}` placeholders are substituted.
 
-After the render, a **hot/cold warm-up banner** (`--hot-report`, gated by
-`ALCF_SHOW_MODEL_STATUS`) reports which offered models are loaded on GPU now vs.
-which will cold-start (~10–15 min, HTTP 503 until ready). Then skills / `MEMORY.md`
+After the render, a **model availability banner** (`--status-report`, gated by
+`ALCF_SHOW_MODEL_STATUS`) classifies every offered model as LIVE / QUEUED /
+OFFLINE against the live `<cluster>/jobs` state and annotates each with its
+context window. QUEUED carries the scheduler's estimated start time, which may be
+hours away — distinct from the ~10–15 min GPU warm-up of a model that is merely
+cold. Then skills / `MEMORY.md`
 / `SOUL.md` are seeded-or-refreshed (checksum-stamped so user edits are never
 clobbered), the 6h refresh loop starts, and the dashboard launches behind Caddy.
 

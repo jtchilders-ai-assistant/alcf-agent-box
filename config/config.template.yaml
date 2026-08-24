@@ -102,12 +102,16 @@ dashboard:
 
 # Curated switchable models — GENERATED AT CONTAINER START by
 # scripts/populate_models.py, which queries the ALCF-specific
-# `.../<cluster>/models` endpoint on BOTH clusters (the gateway 404s the standard
-# OpenAI `/v1/models` path, so Hermes' own live discovery can't work) and emits
-# one `custom_providers` entry per cluster:
+# `.../<cluster>/models` endpoint on every serving cluster (the gateway 404s the
+# standard OpenAI `/v1/models` path, so Hermes' own live discovery can't work)
+# and emits one `custom_providers` entry per cluster:
 #
-#   - alcf-sophia  (vLLM,   full OpenAI-compat)   .../sophia/vllm/v1
-#   - alcf-metis   (SambaNova, chat-only)         .../metis/api/v1
+#   - alcf-sophia   (vLLM,   full OpenAI-compat)   .../sophia/vllm/v1
+#   - alcf-metis    (SambaNova, chat-only)         .../metis/api/v1
+#   - alcf-minerva  (api framework)                .../minerva/api/v1
+#
+# (`tara` is registered upstream but serves no models yet, so it gets no
+# provider; the startup status banner reports it as provisioning.)
 #
 # It filters the catalog to CHAT models (dropping embeddings, vision, and science
 # models like GenSLM/dinov3/sam3) and gives each its REAL serving context window.
@@ -184,3 +188,21 @@ custom_providers:
         context_length: 131072
       gpt-oss-120b:
         context_length: 131072
+  - name: alcf-minerva-reasoning
+    base_url: "https://inference-api.alcf.anl.gov/resource_server/minerva/api/v1"
+    api_key: "${ALCF_ACCESS_TOKEN}"
+    discover_models: false
+    max_tokens: 12288
+    # Minerva publishes a structured `capabilities` object, so these windows and
+    # the reasoning class are read straight from the catalog rather than guessed
+    # (verified live 2026-08-24). All three advertise reasoning.supported=true —
+    # note inkling-bf16 and nemotron-3-ultra match no reasoning ID heuristic, so
+    # the capabilities read is what keeps them out of the 2048-token baseline
+    # (starved of budget they return empty content).
+    models:
+      gpt-oss-120b:
+        context_length: 131072
+      inkling-bf16:
+        context_length: 262144
+      nemotron-3-ultra:
+        context_length: 262144

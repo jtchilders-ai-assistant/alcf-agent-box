@@ -132,7 +132,7 @@ like a real login shell. Recommended knobs at `docker run`:
 | Knowledge seed | `memory/MEMORY.md` | Curated, **sanitized** ALCF facts (always injected) |
 | Docs snapshot | `docs/` | Latest ALCF user docs (refreshed nightly) |
 | Config template | `config/config.template.yaml` | Points Hermes at ALCF inference; carries the static model-list fallback |
-| Model-list generator | `scripts/populate_models.py` | Builds the switchable model list from the live ALCF catalog at start (reasoning split, 64k floor, hot/cold report) |
+| Model-list generator | `scripts/populate_models.py` | Builds the switchable model list from the live ALCF catalog at start (reasoning split, 64k floor, availability report) |
 | Entrypoint | `scripts/entrypoint.sh` | First-run auth, config render, dynamic model list, launch-provider + context-floor guard, token-refresh loop, launch |
 
 ### Architecture: built on the official Hermes image
@@ -172,7 +172,8 @@ running config at container start. Environment variables you can override at
 | `ALCF_DASHBOARD_PASSWORD` | *(auto-generated + printed)* | Dashboard login password (hashed at start; plaintext never stored) |
 | `ALCF_ENABLE_IRI` | `1` | Prompt for the second (IRI) Globus login |
 | `ALCF_ENABLE_METIS` | `1` | Include the Metis cluster's models in the switchable list |
-| `ALCF_SHOW_MODEL_STATUS` | `1` | Print the hot/cold model warm-up banner at startup |
+| `ALCF_ENABLE_MINERVA` | `1` | Include the Minerva cluster's models in the switchable list |
+| `ALCF_SHOW_MODEL_STATUS` | `1` | Print the model availability banner (LIVE/QUEUED/OFFLINE + context windows) at startup |
 | `ALCF_BASH_ACCOUNT` | *(unset)* | **Recommended:** your default ALCF project for the compute-node `bash` tool. When set, the agent holds ONE warm compute node across the whole conversation instead of paying repeated cold starts; when unset, it must ask/look up a project first. |
 | `ALCF_NTFY_TOPIC` | *(unset)* | Secret [ntfy](https://ntfy.sh) topic for push notifications (see below) |
 | `ALCF_NTFY_SERVER` | `https://ntfy.sh` | Self-hosted ntfy relay, if you run one |
@@ -226,9 +227,13 @@ than aborting the launch.
      turn inherits the correct per-model output cap.
    - **Splice + substitute** the providers block into the template and write the
      final config.
-4. **Hot/cold warm-up banner** (`populate_models.py --hot-report`, unless
-   `ALCF_SHOW_MODEL_STATUS=0`): prints which offered models are loaded on GPU
-   *now* vs. which will cold-start (~10–15 min, HTTP 503 until ready).
+4. **Model availability banner** (`populate_models.py --status-report`, unless
+   `ALCF_SHOW_MODEL_STATUS=0`): classifies every offered model as **LIVE**
+   (loaded on GPU now), **QUEUED** (a job exists but hasn't started — the
+   scheduler's estimated start is printed, and can be hours out) or **OFFLINE**
+   (not loaded, not scheduled — requests 503), and prints each model's context
+   window. Models dropped for being under the 64k floor are listed too, so the
+   box's list can be reconciled against the ALCF web UI.
 5. **Seed / refresh skills, memory, and SOUL.** ALCF skills, `MEMORY.md`, and the
    agent's `SOUL.md` identity are image-managed: refreshed from the image on each
    start **only if you haven't edited your copy** (tracked by checksum stamps), so
@@ -286,35 +291,53 @@ providers are named by cluster and reasoning class:
   `nvidia/nemotron-3-super-120b`, `arcee-ai/Trinity-Large-Thinking-…`)
 - **`alcf-metis`** / **`alcf-metis-reasoning`** — the Metis equivalents (drop the
   Metis providers with `-e ALCF_ENABLE_METIS=0`)
+- **`alcf-minerva-reasoning`** — Minerva models (`gpt-oss-120b`, `inkling-bf16`,
+  `nemotron-3-ultra`; drop with `-e ALCF_ENABLE_MINERVA=0`)
+
+A fourth ALCF cluster, **`tara`**, is registered upstream but is still being
+provisioned (it serves no models yet), so it gets no provider. The startup banner
+reports it as provisioning; it will appear automatically once it serves models.
 
 Three behaviors are worth knowing:
 
 1. **64k context floor.** Hermes refuses to load any model whose *real* serving
    window is below 64,000 tokens. ALCF caps many models well under that (all
-   Llama 3.x/4, Mixtral, Devstral, Mistral-Large-2407 serve at 16k–32k), so those
-   are **intentionally excluded** from the list — they would be broken dropdown
-   entries. The generator reads each model's true `max_model_len` from the gateway
-   rather than trusting the published spec.
+   Llama 3.x/4, Mixtral, Devstral, Mistral-Large-2407 serve at 16k–32k; Metis
+   `Mistral-Large-3-675B` serves at just **8192**), so those are **intentionally
+   excluded** from the list — they would be broken dropdown entries. The
+   generator reads each model's true window from the gateway rather than trusting
+   the published spec, and the startup banner names the excluded models with
+   their windows so you can reconcile the box's list against the ALCF web UI.
 
 2. **Reasoning vs. plain chat is a separate provider, with a bigger output cap.**
    Reasoning models (gpt-oss, gemma-4, nemotron-3-super, `*-Thinking`) spend part
    of the `max_tokens` output budget on a hidden reasoning channel, so a small cap
    can leave them returning empty responses. The generator detects reasoning
-   models (via the gateway's `reasoning_parser` field, plus an id heuristic for
-   models served without it) and puts them in the `-reasoning` provider with a
-   larger per-response cap — `ALCF_REASONING_MAX_TOKENS` (default **12288**) vs.
+   models (Minerva's `capabilities.reasoning.supported` where available, else the
+   gateway's `reasoning_parser` field, plus an id heuristic for models served
+   without either) and puts them in the `-reasoning` provider with a larger
+   per-response cap — `ALCF_REASONING_MAX_TOKENS` (default **12288**) vs.
    `ALCF_MAX_TOKENS` (default **2048**) for plain chat. The launch model is
    automatically pointed at whichever provider matches its class, so the first
    turn already gets the right cap.
 
-3. **Hot vs. cold (the HTTP 503 you might see).** All models share the same
-   endpoint + Globus token, so *switching* is instant — but ALCF only keeps a
-   subset loaded on GPU at any moment. Selecting a **cold** model triggers a
-   ~10–15 min load and returns `HTTP 503 "online but not ready"` until it warms
-   up. That looks like a failure but isn't. At startup the container prints a
-   **hot/cold banner** (`populate_models.py --hot-report`) showing which offered
-   models are hot *right now*, so you can pick an instant one or know to wait.
-   Suppress it with `-e ALCF_SHOW_MODEL_STATUS=0`.
+3. **LIVE vs. QUEUED vs. OFFLINE (the HTTP 503 you might see).** All models share
+   the same endpoint + Globus token, so *switching* is instant — but ALCF only
+   keeps a subset loaded on GPU at any moment. At startup the container prints an
+   **availability banner** (`populate_models.py --status-report`) that classifies
+   every offered model and shows its context window:
+
+   - **LIVE** — loaded on GPU, answers immediately.
+   - **QUEUED** — a job exists but hasn't started. The banner prints the
+     scheduler's estimated start, which can be **hours** away when the cluster has
+     no free nodes.
+   - **OFFLINE** — not loaded and not scheduled; requests return
+     `HTTP 503 "... is offline."`
+
+   A model that is merely warming up returns `HTTP 503 "online but not ready"` for
+   ~10–15 min and then works — that looks like a failure but isn't. A whole
+   cluster can also be down, in which case *every* model on it shows OFFLINE.
+   Suppress the banner with `-e ALCF_SHOW_MODEL_STATUS=0`.
 
 If the live catalog is unreachable at startup, the generator falls back to a
 committed static list in `config/config.template.yaml`, so the container always
