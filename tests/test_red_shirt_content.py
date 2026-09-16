@@ -362,8 +362,26 @@ def test_doc_index_row_metadata_is_independently_complete_per_snapshot():
                 f"but lives under {expected_classification!r}"
             )
             if expected_classification == "official":
-                assert provenance.startswith("http"), (
-                    f"official row for {local_path!r} must cite a real canonical URL, got {provenance!r}"
+                assert provenance.startswith("https://docs.alcf.anl.gov/"), (
+                    f"official row for {local_path!r} must cite a canonical "
+                    f"https://docs.alcf.anl.gov/... URL, got {provenance!r}"
+                )
+            else:
+                # Local (measured, non-official) rows must cite concrete,
+                # existing repository-local evidence — at least one
+                # backticked repo-relative path that actually resolves on
+                # disk — not unverifiable prose. A description with no
+                # backticked path, or a backticked path to a nonexistent
+                # file, must fail.
+                repo_paths = re.findall(r"`([^`]+)`", provenance)
+                assert repo_paths, (
+                    f"local row for {local_path!r} must cite at least one "
+                    f"backticked repository-local path as provenance, got {provenance!r}"
+                )
+                existing = [p for p in repo_paths if (ROOT / p).is_file()]
+                assert existing, (
+                    f"local row for {local_path!r} cites backticked path(s) "
+                    f"{repo_paths!r} but none resolve to a real file under {ROOT}"
                 )
 
             indexed_paths.add(local_path)
