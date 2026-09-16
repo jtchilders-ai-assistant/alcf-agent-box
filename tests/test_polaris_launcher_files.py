@@ -69,7 +69,7 @@ def test_credentials_are_host_files_mode_600_and_not_env():
     assert re.search(r"apptainer.*(?:--bind|-B)", body, re.S)
     assert re.search(r"headscale-auth\.key[^\n]*:ro|AUTH_KEY_FILE[^\n]*:ro", body)
     assert re.search(r"caddy-root\.crt[^\n]*:ro|CA_FILE[^\n]*:ro", body)
-    assert not re.search(r"APPTAINERENV_[A-Z_]*(?:AUTH|KEY|TOKEN)", body)
+    assert not re.search(r"APPTAINERENV_[A-Z_]*(?:AUTH|KEY|TOKEN|SECRET|PASS)[A-Z_]*", body)
     assert not re.search(r"^\s*qsub\s+.*(?:-v\b|--variable-list)", text(README), re.M)
 
 
@@ -82,6 +82,27 @@ def test_launcher_proxy_and_runtime_contract():
     assert "--writable" not in body
     assert "--net" not in body and "--network" not in body
     assert "result" in body.lower() and "hostname" in body and "apptainer --version" in body
+
+
+def test_launcher_cleans_sensitive_node_local_state_on_exit():
+    body = text(PBS)
+    assert "trap cleanup_state EXIT" in body
+    assert 'rm -rf "$SCRATCH_ROOT"' in body
+
+
+def test_json_validation_preserves_probe_failure_and_fails_closed_on_success():
+    body = text(PBS)
+    assert "json_rc=$?" in body
+    assert '[ "$probe_rc" -ne 0 ]' in body
+    assert '[ "$json_rc" -ne 0 ]' in body
+    assert "exit \"$probe_rc\"" in body
+
+
+def test_secret_env_guard_covers_common_secret_names():
+    body = text(PBS)
+    assert not re.search(
+        r"APPTAINERENV_[A-Z_]*(?:AUTH|KEY|TOKEN|SECRET|PASS)[A-Z_]*", body
+    )
 
 
 def test_documented_key_lifecycle_and_ca_verification():

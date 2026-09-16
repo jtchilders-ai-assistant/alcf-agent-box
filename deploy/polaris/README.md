@@ -32,7 +32,17 @@ Stop if it differs. Never use `curl -k` or disable certificate verification.
 
 ## Create and stage the Headscale pre-auth key
 
-On the Headscale server, identify the numeric user ID, then create a **short-lived, reusable, ephemeral** pre-auth key. Headscale v0.29.3 requires a numeric ID for `--user`. Substitute real values only in the interactive server shell; the values below are placeholders:
+The expected Headscale server version is `v0.29.3`; verify the live CLI before creating or revoking anything:
+
+```bash
+cd /opt/headscale
+docker compose exec headscale headscale version
+docker compose exec headscale headscale preauthkeys create --help
+docker compose exec headscale headscale preauthkeys expire --help
+docker compose exec headscale headscale nodes delete --help
+```
+
+Then identify the numeric user ID and create a **short-lived, reusable, ephemeral** pre-auth key. Headscale v0.29.3 requires a numeric ID for `--user`. Substitute real values only in the interactive server shell; the values below are placeholders:
 
 ```bash
 cd /opt/headscale
@@ -65,6 +75,8 @@ Run this on a suitable Polaris node. The script loads `spack-pe-base` before `ap
 ```bash
 bash deploy/polaris/build-probe-sif.sh
 ```
+
+The final SIF and checksum sidecar are written to `$HOME`; temporary extraction and cache traffic stays on `/local/scratch`. Ensure `$HOME` has adequate free space. If the PBS-side `sha256sum -c` check fails, discard both files and rebuild rather than trusting a partial artifact.
 
 It writes:
 

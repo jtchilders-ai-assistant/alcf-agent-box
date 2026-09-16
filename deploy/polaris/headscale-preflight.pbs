@@ -18,8 +18,14 @@ SIF="${SIF:-$BASE_DIR/alcf-headscale-probe-sha-d26b9fd.sif}"
 AUTH_KEY_FILE="${AUTH_KEY_FILE:-$BASE_DIR/headscale-auth.key}"
 CA_FILE="${CA_FILE:-$BASE_DIR/caddy-root.crt}"
 JOB_SHORT="${PBS_JOBID%%.*}"
-STATE_DIR="/local/scratch/${USER}/headscale-preflight-${JOB_SHORT}/state"
+SCRATCH_ROOT="/local/scratch/${USER}/headscale-preflight-${JOB_SHORT}"
+STATE_DIR="$SCRATCH_ROOT/state"
 RESULT_DIR="$BASE_DIR/results/${PBS_JOBID}"
+
+cleanup_state() {
+  rm -rf "$SCRATCH_ROOT"
+}
+trap cleanup_state EXIT
 
 export HTTP_PROXY="http://proxy.alcf.anl.gov:3128"
 export HTTPS_PROXY="$HTTP_PROXY"
@@ -66,7 +72,7 @@ chmod 700 "$STATE_DIR" "$RESULT_DIR"
   printf 'source_manifest_digest=%s\n' "$EXPECTED_MANIFEST_DIGEST"
   printf 'sif_sha256=%s\n' "$(sha256sum "$SIF" | cut -d' ' -f1)"
   apptainer --version
-  apptainer exec "$SIF" tailscale version
+  apptainer exec "$SIF" tailscale version || true
 } >"$RESULT_DIR/metadata.txt"
 
 # APPTAINERENV_* carries only non-secret runtime configuration. The auth key is
@@ -88,5 +94,14 @@ probe_rc=$?
 set -e
 
 printf 'probe_exit_code=%s\n' "$probe_rc" >>"$RESULT_DIR/metadata.txt"
-python3 -m json.tool "$RESULT_DIR/result.json" >/dev/null
+json_rc=0
+python3 -m json.tool "$RESULT_DIR/result.json" >/dev/null 2>&1 || json_rc=$?
+printf 'result_json_valid=%s\n' "$([ "$json_rc" -eq 0 ] && printf true || printf false)" >>"$RESULT_DIR/metadata.txt"
+if [ "$probe_rc" -ne 0 ]; then
+  exit "$probe_rc"
+fi
+if [ "$json_rc" -ne 0 ]; then
+  printf 'ERROR: probe exited successfully but result.json is invalid JSON\n' >&2
+  exit 1
+fi
 exit "$probe_rc"
