@@ -213,6 +213,23 @@ def _check_wesley_authority(url: str, proxy_url: Optional[str],
         )
 
 
+def _redact_secret(text: str, secret: Optional[str]) -> str:
+    """Strip a known secret value out of an arbitrary (possibly peer-
+    controlled) string before it is ever placed in a JSON detail field,
+    stdout, or stderr.
+
+    Round-3 review finding: a JSON-RPC ``error.message`` (or any other
+    free-text field echoed back by the remote peer) is untrusted input —
+    a malicious or buggy peer can reflect the exact ``Authorization``
+    header value it received, leaking the bearer token into our own
+    "secret-free" error output. Redact defensively wherever peer-supplied
+    text is folded into a result dict alongside a token we hold locally.
+    """
+    if not secret or not text:
+        return text
+    return text.replace(secret, "[REDACTED]")
+
+
 def _text_part(text: str) -> dict:
     return {"text": text, "mediaType": "text/plain"}
 
@@ -321,6 +338,11 @@ def probe_a2a_send(url: str, token_file: str, message: str,
     if "error" in parsed:
         err = parsed["error"]
         detail = err.get("message", str(err)) if isinstance(err, dict) else str(err)
+        # Round-3 review finding: `detail` is peer-controlled free text — a
+        # malicious/buggy peer can echo our own Authorization header back
+        # in an error message. Redact the exact bearer token we sent
+        # before this ever reaches a result dict, stdout, or stderr.
+        detail = _redact_secret(detail, token)
         return {"step": "a2a_send", "ok": False, "detail": f"peer returned an error: {detail}"}
 
     result = parsed.get("result")

@@ -151,6 +151,29 @@ class FakeA2AServer(_JSONHandler):
         self._send_json(200, {"jsonrpc": "2.0", "id": body.get("id"), "result": {"task": task}})
 
 
+class TokenReflectingA2AServer(_JSONHandler):
+    """A malicious/buggy A2A peer that echoes the received Authorization
+    header verbatim inside a JSON-RPC error message.
+
+    Simulates the round-3 review finding: an authenticated request's
+    bearer token must never be reflected into our own stdout/stderr/JSON
+    output just because a remote peer chose to put it in free-text error
+    content we did not sanitize.
+    """
+
+    def do_POST(self):  # noqa: N802
+        raw = self._read_body()
+        try:
+            body = json.loads(raw.decode("utf-8"))
+        except Exception:
+            body = {}
+        auth = self.headers.get("Authorization", "")
+        self._send_json(200, {
+            "jsonrpc": "2.0", "id": body.get("id"),
+            "error": {"code": -32000, "message": f"forbidden: saw header {auth!r}"},
+        })
+
+
 class FakeInferenceServer(_JSONHandler):
     """OpenAI-compatible /chat/completions endpoint."""
 
@@ -647,6 +670,30 @@ class TestProbeA2ASend:
         assert FakeA2AServer.expected_token not in " ".join(args)
         result = run_cli(args)
         assert result.returncode == 0, result.stderr
+
+    def test_reflected_token_in_peer_error_never_reaches_output(self, tmp_path):
+        """Round-3 review finding: a peer's JSON-RPC error.message is
+        untrusted free text. If the peer reflects our own Authorization
+        header back at us in an error, the sent bearer token must never
+        appear in stdout or stderr — it must be redacted before it is
+        placed in the result dict."""
+        srv = _start(TokenReflectingA2AServer)
+        try:
+            secret_token = "review-secret-token-1234567890"
+            token_file = _write_token(tmp_path, secret_token)
+            url = _free_addr(srv)
+            result = run_cli([
+                "a2a-send", "--url", url, "--token-file", str(token_file),
+                "--message", "ping",
+            ])
+            assert result.returncode != 0
+            payload = json.loads(result.stdout)
+            assert payload["ok"] is False
+            assert secret_token not in result.stdout, result.stdout
+            assert secret_token not in result.stderr, result.stderr
+            assert secret_token not in json.dumps(payload)
+        finally:
+            srv.shutdown()
 
 
 # ---------------------------------------------------------------------------
