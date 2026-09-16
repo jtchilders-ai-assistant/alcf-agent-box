@@ -321,3 +321,94 @@ class TestRobustness:
             r"set\s+.*-[a-zA-Z]*u[a-zA-Z]*|set\s+-o\s+nounset",
             content
         ), "set -u / set -o nounset not found"
+
+
+# ---------------------------------------------------------------------------
+# CA path propagation — Task 1 operability fix
+# ---------------------------------------------------------------------------
+
+class TestCACertDefault:
+    """CACERT must have a safe in-script default so PBS jobs work without
+    -V / -v on qsub.  The default path is
+    $HOME/polaris-headscale-preflight/caddy-root.crt and callers can override
+    it via 'qsub ... -v CACERT=/alternate/path'."""
+
+    EXPECTED_DEFAULT_SUFFIX = "polaris-headscale-preflight/caddy-root.crt"
+
+    def test_cacert_has_shell_default(self):
+        """CACERT must use the ${CACERT:-<default>} pattern so the script
+        works without the caller exporting CACERT or passing qsub -V."""
+        content = _read_script()
+        assert re.search(
+            r"\$\{CACERT:-[^}]+\}",
+            content
+        ), (
+            "CACERT variable must have a safe default via "
+            "'${CACERT:-$HOME/polaris-headscale-preflight/caddy-root.crt}'. "
+            "Without it, qsub -V or -v CACERT=... is the only way to "
+            "propagate the value into the compute node environment, which "
+            "is not obvious and breaks by default."
+        )
+
+    def test_cacert_default_references_expected_path(self):
+        """The default CA path must include the expected filename suffix
+        '$HOME/polaris-headscale-preflight/caddy-root.crt'."""
+        content = _read_script()
+        m = re.search(r"\$\{CACERT:-([^}]+)\}", content)
+        assert m, (
+            "CACERT must use ${CACERT:-<default>} shell expansion. "
+            "No such pattern found."
+        )
+        default_val = m.group(1)
+        assert self.EXPECTED_DEFAULT_SUFFIX in default_val, (
+            f"CACERT default '{default_val}' must include "
+            f"'{self.EXPECTED_DEFAULT_SUFFIX}'."
+        )
+
+    def test_usage_comment_shows_default_invocation(self):
+        """Usage comment must show plain 'qsub -A ...' (default CA path) form."""
+        content = _read_script()
+        # e.g.:   qsub -A "$ALCF_PROJECT" deploy/polaris/probe-egress.pbs
+        # (no -v CACERT, no -V; the default is already baked in)
+        assert re.search(
+            r"qsub\s+-A\s+[\"']?\$(?:\{ALCF_PROJECT\}|ALCF_PROJECT)[\"']?\s+[^\n]*probe-egress\.pbs",
+            content
+        ), (
+            "Usage comment must include a plain invocation like:\n"
+            "  qsub -A \"$ALCF_PROJECT\" deploy/polaris/probe-egress.pbs\n"
+            "showing callers that no -v CACERT or -V is needed for the "
+            "default CA path."
+        )
+
+    def test_usage_comment_shows_override_invocation(self):
+        """Usage comment must show '-v CACERT=...' override form for callers
+        who need a non-default CA certificate."""
+        content = _read_script()
+        # e.g.:  qsub -A "$ALCF_PROJECT" -v CACERT=/alternate/path ...
+        assert re.search(
+            r"qsub\s+.*-v\s+CACERT=",
+            content
+        ), (
+            "Usage comment must include an override invocation like:\n"
+            "  qsub -A \"$ALCF_PROJECT\" -v CACERT=/alternate/path ...\n"
+            "so callers know how to supply a non-default CA certificate "
+            "without needing qsub -V."
+        )
+
+    def test_no_awkward_nested_quoting_in_comments(self):
+        r"""Comment lines must not contain nested shell quoting like
+        'qsub -A \"$ALCF_PROJECT\"' (backslash-escaped quotes inside
+        a comment) — plain qsub -A "$ALCF_PROJECT" is correct."""
+        content = _read_script()
+        for lineno, line in enumerate(content.splitlines(), 1):
+            stripped = line.lstrip()
+            if not stripped.startswith("#"):
+                continue
+            # A comment line that contains \" is a red flag for copy-paste
+            # of shell code that was escaped for a different quoting context.
+            if re.search(r'\\"', line):
+                raise AssertionError(
+                    f"Line {lineno} has awkward backslash-escaped quotes "
+                    f"inside a comment:\n  {line}\n"
+                    "Replace '\\\"' with plain '\"' in comment text."
+                )

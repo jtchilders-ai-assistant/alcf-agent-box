@@ -6,16 +6,21 @@
 #   through the ALCF proxy.  Does NOT submit any external jobs.
 #
 # USAGE
-#   Set ALCF_PROJECT and CACERT in your environment before submitting, e.g.:
-#     export ALCF_PROJECT=myproject
-#     export CACERT=/path/to/caddy-ca.crt   # private Caddy CA cert
+#   Default CA path (no CACERT export or -V needed):
 #     qsub -A "$ALCF_PROJECT" deploy/polaris/probe-egress.pbs
 #
-#   CACERT is the path to the Caddy CA certificate that the Headscale/Caddy
-#   reverse proxy presents.  It is NOT trusted in the Polaris system bundle,
-#   so it must be staged and provided explicitly.
+#   Override CA path (e.g. a non-default Caddy root cert):
+#     qsub -A "$ALCF_PROJECT" -v CACERT=/alternate/path/caddy-root.crt \
+#          deploy/polaris/probe-egress.pbs
 #
-#   If CACERT is unset or the file is unreadable, the TLS probe is skipped
+#   CACERT is the path to the Caddy CA certificate that the Headscale/Caddy
+#   reverse proxy presents.  It is NOT trusted in the Polaris system bundle.
+#   The script defaults to $HOME/polaris-headscale-preflight/caddy-root.crt;
+#   override via qsub -v CACERT=... when a different cert is needed.
+#   PBS jobs do NOT inherit arbitrary environment variables unless qsub -V
+#   (export everything) or qsub -v CACERT=... (export one variable) is used.
+#
+#   If the resolved CACERT file is unreadable, the TLS probe is skipped
 #   and tls_result is reported as SKIPPED.
 #
 # OUTPUT
@@ -25,7 +30,7 @@
 # NOTE: #PBS -A is intentionally absent — Polaris PBS does NOT expand shell
 # variables inside directives, so "#PBS -A ${ALCF_PROJECT}" would submit
 # under the literal string "${ALCF_PROJECT}" and be rejected.  Always pass
-# the project with "qsub -A "$ALCF_PROJECT"" on the command line.
+# the project with:  qsub -A "$ALCF_PROJECT"  on the command line.
 #
 #PBS -N egress-probe
 #PBS -l select=1:system=polaris
@@ -97,13 +102,19 @@ say "public_ip: ${PUBLIC_IP:-UNAVAILABLE}"
 # ---------------------------------------------------------------------------
 say "--- Proxied TLS: https://143.198.112.69.sslip.io ---"
 
+# Default CA path: $HOME/polaris-headscale-preflight/caddy-root.crt.
+# PBS jobs do not inherit arbitrary shell variables; callers who need a
+# different cert should pass: qsub -v CACERT=/alternate/path ...
+# (not qsub -V which exports everything).
+CACERT=${CACERT:-$HOME/polaris-headscale-preflight/caddy-root.crt}
+
 # Default: skip if CA file not provided or unreadable.
 TLS_STATUS="000"
 TLS_ADDR="unknown"
 TLS_RESULT="SKIPPED"
 tls_curl_rc=0
 
-if [ -r "${CACERT:-}" ]; then
+if [ -r "${CACERT}" ]; then
     say "cacert: ${CACERT} (readable)"
     # Run curl; capture exit code without triggering set -e.
     TLS_OUT=$(curl \
@@ -125,8 +136,8 @@ if [ -r "${CACERT:-}" ]; then
         TLS_RESULT="FAIL"
     fi
 else
-    say "cacert: CACERT not set or file not readable — TLS probe skipped"
-    say "  To enable: export CACERT=/path/to/caddy-ca.crt"
+    say "cacert: ${CACERT} not readable — TLS probe skipped"
+    say "  Stage the CA cert or override: qsub -v CACERT=/path/to/caddy-root.crt ..."
 fi
 
 say "tls_status: ${TLS_STATUS:-000}"
