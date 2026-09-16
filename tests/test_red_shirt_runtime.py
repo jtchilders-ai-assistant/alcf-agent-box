@@ -190,14 +190,19 @@ class MalformedJSONHandler(_JSONHandler):
         self.wfile.write(body)
 
 
-class ForwardingHTTPProxy(http.server.BaseHTTPRequestHandler):
+class _ForwardingProxyBase(http.server.BaseHTTPRequestHandler):
     """A real HTTP forward proxy for absolute-form requests.
 
     Ignores the (possibly unresolvable, fake tailnet) requested hostname and
-    always forwards to ``backend_addr`` — this simulates Tailscale's
-    userspace outbound HTTP proxy resolving a tailnet-only authority that
-    the test process's real DNS cannot resolve, while letting the test
-    assert exactly which authority the client asked the proxy to reach.
+    always forwards to ``backend_addr`` — this simulates a userspace
+    outbound HTTP proxy resolving an authority that the test process's real
+    DNS cannot resolve, while letting the test assert exactly which
+    authority the client asked the proxy to reach.
+
+    Subclassed (not shared) per logical proxy so that two independently
+    running fake proxies in the same test (e.g. a Tailscale-style proxy and
+    a distinct ALCF-style proxy) each keep their own ``backend_addr`` /
+    ``received_authorities`` class state instead of clobbering each other.
     """
 
     backend_addr: str = ""  # "127.0.0.1:PORT" — set per test
@@ -239,6 +244,26 @@ class ForwardingHTTPProxy(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):  # noqa: N802
         self._forward("POST")
+
+
+class ForwardingHTTPProxy(_ForwardingProxyBase):
+    """Simulates the Tailscale userspace outbound HTTP proxy used for
+    authenticated Wesley A2A traffic."""
+
+    backend_addr: str = ""
+    received_authorities: list[str] = []
+
+
+class AlcfForwardHTTPProxy(_ForwardingProxyBase):
+    """Simulates the distinct ALCF forward proxy used for inference.
+
+    A separate class (own ``backend_addr``/``received_authorities``) from
+    ``ForwardingHTTPProxy`` so a test can run both simultaneously and prove
+    each carries only its own traffic.
+    """
+
+    backend_addr: str = ""
+    received_authorities: list[str] = []
 
 
 def _start(handler_cls) -> http.server.HTTPServer:
@@ -284,6 +309,18 @@ def forward_proxy():
     srv.shutdown()
 
 
+@pytest.fixture
+def alcf_forward_proxy():
+    """A second, independent fake forward proxy simulating the distinct ALCF
+    forward proxy used for inference — separate class/state from
+    ``forward_proxy`` (the Tailscale-style proxy) so a test can prove
+    simultaneous, non-overlapping routing."""
+    AlcfForwardHTTPProxy.received_authorities = []
+    srv = _start(AlcfForwardHTTPProxy)
+    yield srv
+    srv.shutdown()
+
+
 # ---------------------------------------------------------------------------
 # File existence / syntax
 # ---------------------------------------------------------------------------
@@ -321,7 +358,8 @@ class TestProbeCard:
         fake_wesley_url = "http://red-shirt-fake-wesley.invalid:9900"
         proxy_url = _free_addr(forward_proxy)
 
-        result = run_cli(["card", "--url", fake_wesley_url, "--proxy", proxy_url])
+        result = run_cli(["card", "--url", fake_wesley_url, "--proxy", proxy_url,
+                          "--proxy-authority", "red-shirt-fake-wesley.invalid:9900"])
         assert result.returncode == 0, result.stderr
         payload = json.loads(result.stdout)
         assert payload["ok"] is True
@@ -333,6 +371,38 @@ class TestProbeCard:
         assert any("red-shirt-fake-wesley.invalid:9900" in a
                    for a in ForwardingHTTPProxy.received_authorities), \
             ForwardingHTTPProxy.received_authorities
+
+    def test_card_probe_via_proxy_without_authority_allowlist_rejected(self, card_server, forward_proxy):
+        """--proxy without --proxy-authority must fail closed and issue NO
+        network call — the Tailscale proxy must never be usable for an
+        unconstrained authority."""
+        ForwardingHTTPProxy.backend_addr = f"127.0.0.1:{card_server.server_port}"
+        fake_wesley_url = "http://red-shirt-fake-wesley.invalid:9900"
+        proxy_url = _free_addr(forward_proxy)
+
+        result = run_cli(["card", "--url", fake_wesley_url, "--proxy", proxy_url])
+        assert result.returncode != 0
+        payload = json.loads(result.stdout)
+        assert payload["ok"] is False
+        assert ForwardingHTTPProxy.received_authorities == [], \
+            "no request should reach the proxy when --proxy-authority is missing"
+
+    def test_card_probe_via_proxy_wrong_authority_rejected(self, card_server, forward_proxy):
+        """A caller-supplied URL for a DIFFERENT authority than the exact
+        allowlisted --proxy-authority must be rejected before any network
+        call — proving the Tailscale proxy can't be used to reach an
+        arbitrary authority."""
+        ForwardingHTTPProxy.backend_addr = f"127.0.0.1:{card_server.server_port}"
+        arbitrary_url = "http://some-other-arbitrary-host.invalid:12345"
+        proxy_url = _free_addr(forward_proxy)
+
+        result = run_cli(["card", "--url", arbitrary_url, "--proxy", proxy_url,
+                          "--proxy-authority", "red-shirt-fake-wesley.invalid:9900"])
+        assert result.returncode != 0
+        payload = json.loads(result.stdout)
+        assert payload["ok"] is False
+        assert ForwardingHTTPProxy.received_authorities == [], \
+            "no request should reach the proxy for a non-allowlisted authority"
 
     def test_card_probe_without_proxy_direct(self, card_server):
         url = _free_addr(card_server)
@@ -456,10 +526,27 @@ class TestProbeA2ASend:
         result = run_cli([
             "a2a-send", "--url", fake_wesley_url, "--token-file", str(token_file),
             "--message", "ping", "--proxy", proxy_url,
+            "--proxy-authority", "red-shirt-fake-wesley.invalid:9900",
         ])
         assert result.returncode == 0, result.stderr
         assert any("red-shirt-fake-wesley.invalid:9900" in a
                    for a in ForwardingHTTPProxy.received_authorities)
+
+    def test_send_via_proxy_wrong_authority_rejected_no_network_call(self, a2a_server, forward_proxy, tmp_path):
+        ForwardingHTTPProxy.backend_addr = f"127.0.0.1:{a2a_server.server_port}"
+        token_file = _write_token(tmp_path, FakeA2AServer.expected_token)
+        arbitrary_url = "http://some-other-arbitrary-host.invalid:12345"
+        proxy_url = _free_addr(forward_proxy)
+
+        result = run_cli([
+            "a2a-send", "--url", arbitrary_url, "--token-file", str(token_file),
+            "--message", "ping", "--proxy", proxy_url,
+            "--proxy-authority", "red-shirt-fake-wesley.invalid:9900",
+        ])
+        assert result.returncode != 0
+        payload = json.loads(result.stdout)
+        assert payload["ok"] is False
+        assert ForwardingHTTPProxy.received_authorities == []
 
     def test_token_never_appears_in_argv(self, a2a_server, tmp_path):
         """The bearer token must be read from a file, never passed as a CLI arg."""
@@ -549,6 +636,27 @@ class TestProbeInference:
         assert FakeInferenceServer.expected_token not in result.stdout
         assert FakeInferenceServer.expected_token not in result.stderr
 
+    def test_inference_routes_through_explicit_alcf_proxy(
+        self, inference_server, alcf_forward_proxy, tmp_path
+    ):
+        """--proxy on the inference subcommand must actually be used — this
+        is the distinct ALCF forward proxy, never the Tailscale proxy."""
+        AlcfForwardHTTPProxy.backend_addr = f"127.0.0.1:{inference_server.server_port}"
+        token_file = _write_token(tmp_path, FakeInferenceServer.expected_token)
+        fake_alcf_url = "http://red-shirt-fake-alcf.invalid:8000"
+
+        result = run_cli([
+            "inference", "--base-url", fake_alcf_url,
+            "--model", "argonne/AuroraGPT-IT-v4-0125", "--token-file", str(token_file),
+            "--proxy", _free_addr(alcf_forward_proxy),
+        ])
+        assert result.returncode == 0, result.stderr
+        payload = json.loads(result.stdout)
+        assert payload["ok"] is True
+        assert any("red-shirt-fake-alcf.invalid:8000" in a
+                   for a in AlcfForwardHTTPProxy.received_authorities), \
+            AlcfForwardHTTPProxy.received_authorities
+
 
 # ---------------------------------------------------------------------------
 # probe ready-record — aggregate JSON record, no secrets, proxy split
@@ -634,40 +742,56 @@ class TestReadyRecord:
         assert steps["a2a_send"] is True
 
     def test_ready_record_proxy_routes_only_wesley_calls(
-        self, card_server, a2a_server, inference_server, forward_proxy, tmp_path
+        self, card_server, a2a_server, inference_server, forward_proxy,
+        alcf_forward_proxy, tmp_path
     ):
-        """card + a2a-send go through the Tailscale-style forward proxy for
-        the exact Wesley authority; inference is never routed through it."""
-        ForwardingHTTPProxy.backend_addr = f"127.0.0.1:{card_server.server_port}"
+        """card + a2a-send (Wesley, tailnet-only) are routed through the
+        Tailscale-style forward proxy for the exact Wesley authority;
+        inference is simultaneously routed through a DISTINCT ALCF-style
+        forward proxy. Each fake proxy records only its own traffic,
+        proving the two paths never cross."""
+        ForwardingHTTPProxy.backend_addr = f"127.0.0.1:{a2a_server.server_port}"
+        AlcfForwardHTTPProxy.backend_addr = f"127.0.0.1:{inference_server.server_port}"
         a2a_token_file = _write_token(tmp_path, FakeA2AServer.expected_token, "a2a.token")
         inference_token_file = _write_token(tmp_path, FakeInferenceServer.expected_token, "inference.token")
         output = tmp_path / "ready.json"
         fake_wesley = "http://red-shirt-fake-wesley.invalid:9900"
+        fake_alcf = "http://red-shirt-fake-alcf.invalid:8000"
+        wesley_proxy = _free_addr(forward_proxy)
+        alcf_proxy = _free_addr(alcf_forward_proxy)
 
-        # Route only the card check (proxy backend is the card server here);
-        # a2a-send targets the real a2a_server directly (no proxy) so both
-        # proxied and non-proxied calls are exercised together.
         args = [
             "ready-record", "--output", str(output),
-            "--card-url", fake_wesley, "--card-proxy", _free_addr(forward_proxy),
+            "--card-url", _free_addr(card_server),
             "--a2a-negative-url", _free_addr(a2a_server),
-            "--a2a-send-url", _free_addr(a2a_server),
+            "--a2a-send-url", fake_wesley, "--a2a-proxy", wesley_proxy,
+            "--a2a-proxy-authority", "red-shirt-fake-wesley.invalid:9900",
             "--a2a-token-file", str(a2a_token_file),
             "--a2a-message", "readiness ping",
-            "--inference-base-url", _free_addr(inference_server),
+            "--inference-base-url", fake_alcf, "--inference-proxy", alcf_proxy,
             "--inference-model", "argonne/AuroraGPT-IT-v4-0125",
             "--inference-token-file", str(inference_token_file),
         ]
         result = run_cli(args)
         assert result.returncode == 0, result.stderr
+        payload = json.loads(result.stdout)
+        assert payload["overall_ok"] is True
+
+        # The authenticated A2A send must have gone through the Tailscale
+        # proxy for the exact Wesley authority ...
         assert any("red-shirt-fake-wesley.invalid:9900" in a
-                   for a in ForwardingHTTPProxy.received_authorities)
-        # Inference must never appear as a requested authority on the
-        # Tailscale-style forward proxy — it stays off that path entirely.
-        assert not any(
-            str(inference_server.server_port) in a
-            for a in ForwardingHTTPProxy.received_authorities
-        )
+                   for a in ForwardingHTTPProxy.received_authorities), \
+            ForwardingHTTPProxy.received_authorities
+        # ... and inference must have gone through the distinct ALCF proxy
+        # for the ALCF authority, at the same time ...
+        assert any("red-shirt-fake-alcf.invalid:8000" in a
+                   for a in AlcfForwardHTTPProxy.received_authorities), \
+            AlcfForwardHTTPProxy.received_authorities
+        # ... and neither authority ever crossed into the other proxy.
+        assert not any("red-shirt-fake-alcf.invalid:8000" in a
+                       for a in ForwardingHTTPProxy.received_authorities)
+        assert not any("red-shirt-fake-wesley.invalid:9900" in a
+                       for a in AlcfForwardHTTPProxy.received_authorities)
 
 
 if __name__ == "__main__":
