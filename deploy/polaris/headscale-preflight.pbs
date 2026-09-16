@@ -11,10 +11,10 @@
 
 set -euo pipefail
 
-IMAGE="ghcr.io/jtchilders-ai-assistant/alcf-agent-headscale-probe:sha-d26b9fd"
-EXPECTED_MANIFEST_DIGEST="sha256:e39f7851e4bac35fe508e870e1439ddd08916751268305deff0f2b52e18d7e46"
+IMAGE="ghcr.io/jtchilders-ai-assistant/alcf-agent-headscale-probe:sha-e61a1b3"
+EXPECTED_MANIFEST_DIGEST="sha256:157983581bf121b0cedcb2c45922f65e7e4bd6309b2ad69ee5c6389ecf20fc6e"
 BASE_DIR="${BASE_DIR:-$HOME/polaris-headscale-preflight}"
-SIF="${SIF:-$BASE_DIR/alcf-headscale-probe-sha-d26b9fd.sif}"
+SIF="${SIF:-$BASE_DIR/alcf-headscale-probe-sha-e61a1b3.sif}"
 AUTH_KEY_FILE="${AUTH_KEY_FILE:-$BASE_DIR/headscale-auth.key}"
 CA_FILE="${CA_FILE:-$BASE_DIR/caddy-root.crt}"
 JOB_SHORT="${PBS_JOBID%%.*}"

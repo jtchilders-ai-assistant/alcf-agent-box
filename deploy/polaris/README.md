@@ -4,8 +4,8 @@ This procedure runs the minimal Tailscale transport probe on a Polaris compute n
 
 ## Pinned artifact
 
-- OCI image: `ghcr.io/jtchilders-ai-assistant/alcf-agent-headscale-probe:sha-d26b9fd`
-- OCI manifest digest: `sha256:e39f7851e4bac35fe508e870e1439ddd08916751268305deff0f2b52e18d7e46`
+- OCI image: `ghcr.io/jtchilders-ai-assistant/alcf-agent-headscale-probe:sha-e61a1b3`
+- OCI manifest digest: `sha256:157983581bf121b0cedcb2c45922f65e7e4bd6309b2ad69ee5c6389ecf20fc6e`
 - Expected platforms: `linux/amd64`, `linux/arm64`
 
 Do not replace the immutable SHA tag with `latest` for a recorded preflight.
@@ -81,8 +81,8 @@ The final SIF and checksum sidecar are written to `$HOME`; temporary extraction 
 It writes:
 
 ```text
-$HOME/polaris-headscale-preflight/alcf-headscale-probe-sha-d26b9fd.sif
-$HOME/polaris-headscale-preflight/alcf-headscale-probe-sha-d26b9fd.sif.sha256
+$HOME/polaris-headscale-preflight/alcf-headscale-probe-sha-e61a1b3.sif
+$HOME/polaris-headscale-preflight/alcf-headscale-probe-sha-e61a1b3.sif.sha256
 ```
 
 ## Submit the compute probe

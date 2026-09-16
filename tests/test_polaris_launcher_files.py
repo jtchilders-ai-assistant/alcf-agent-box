@@ -9,8 +9,8 @@ README = DEPLOY / "README.md"
 BUILD = DEPLOY / "build-probe-sif.sh"
 PBS = DEPLOY / "headscale-preflight.pbs"
 PROBE = ROOT / "scripts" / "headscale_probe.sh"
-IMAGE = "ghcr.io/jtchilders-ai-assistant/alcf-agent-headscale-probe:sha-d26b9fd"
-DIGEST = "sha256:e39f7851e4bac35fe508e870e1439ddd08916751268305deff0f2b52e18d7e46"
+IMAGE = "ghcr.io/jtchilders-ai-assistant/alcf-agent-headscale-probe:sha-e61a1b3"
+DIGEST = "sha256:157983581bf121b0cedcb2c45922f65e7e4bd6309b2ad69ee5c6389ecf20fc6e"
 FINGERPRINT = "71:63:DE:FF:81:7C:E9:18:DA:F5:5F:7D:64:0B:C4:A8:FE:91:C7:D4:EE:25:71:4D:FB:A9:5B:AE:D3:9F:F3:8D"
 
 

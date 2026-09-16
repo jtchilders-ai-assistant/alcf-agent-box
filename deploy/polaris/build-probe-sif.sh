@@ -2,10 +2,10 @@
 # Build the immutable Headscale probe OCI image as an Apptainer SIF on Polaris.
 set -euo pipefail
 
-IMAGE="ghcr.io/jtchilders-ai-assistant/alcf-agent-headscale-probe:sha-d26b9fd"
-EXPECTED_DIGEST="sha256:e39f7851e4bac35fe508e870e1439ddd08916751268305deff0f2b52e18d7e46"
+IMAGE="ghcr.io/jtchilders-ai-assistant/alcf-agent-headscale-probe:sha-e61a1b3"
+EXPECTED_DIGEST="sha256:157983581bf121b0cedcb2c45922f65e7e4bd6309b2ad69ee5c6389ecf20fc6e"
 OUT_DIR="${OUT_DIR:-$HOME/polaris-headscale-preflight}"
-SIF="${SIF:-$OUT_DIR/alcf-headscale-probe-sha-d26b9fd.sif}"
+SIF="${SIF:-$OUT_DIR/alcf-headscale-probe-sha-e61a1b3.sif}"
 JOB_TAG="${PBS_JOBID:-manual-$$}"
 SCRATCH_ROOT="/local/scratch/${USER}/headscale-probe-${JOB_TAG%%.*}"
 
