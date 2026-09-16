@@ -21,6 +21,7 @@ permissions:
 
 env:
   IMAGE: ghcr.io/${{ github.repository_owner }}/alcf-agent
+  PROBE_IMAGE: ghcr.io/${{ github.repository_owner }}/alcf-agent-headscale-probe
 
 jobs:
   build:
@@ -74,3 +75,50 @@ jobs:
           build-args: |
             ALCF_GIT_SHA=${{ github.sha }}
             ALCF_BUILD_DATE=${{ github.event.repository.updated_at }}
+
+  # ---------------------------------------------------------------------------
+  # Headscale probe image
+  # Separate minimal image: tailscale + connect_proxy + headscale_probe.sh
+  # Published as ghcr.io/<owner>/alcf-agent-headscale-probe
+  # ---------------------------------------------------------------------------
+  build-headscale-probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute headscale-probe tags
+        id: probe-meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.PROBE_IMAGE }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=tag
+            type=sha,format=short
+
+      - name: Set up QEMU (for cross-arch emulation)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push headscale-probe image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.headscale-probe
+          platforms: linux/amd64,linux/arm64
+          push: true
+          cache-from: type=gha,scope=headscale-probe-${{ github.sha }}
+          cache-to: type=gha,scope=headscale-probe-${{ github.sha }},mode=max
+          provenance: false
+          tags: ${{ steps.probe-meta.outputs.tags }}
+          labels: ${{ steps.probe-meta.outputs.labels }}
+
