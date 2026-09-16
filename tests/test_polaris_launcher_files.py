@@ -8,6 +8,7 @@ DEPLOY = ROOT / "deploy" / "polaris"
 README = DEPLOY / "README.md"
 BUILD = DEPLOY / "build-probe-sif.sh"
 PBS = DEPLOY / "headscale-preflight.pbs"
+PROBE = ROOT / "scripts" / "headscale_probe.sh"
 IMAGE = "ghcr.io/jtchilders-ai-assistant/alcf-agent-headscale-probe:sha-d26b9fd"
 DIGEST = "sha256:e39f7851e4bac35fe508e870e1439ddd08916751268305deff0f2b52e18d7e46"
 FINGERPRINT = "71:63:DE:FF:81:7C:E9:18:DA:F5:5F:7D:64:0B:C4:A8:FE:91:C7:D4:EE:25:71:4D:FB:A9:5B:AE:D3:9F:F3:8D"
@@ -67,8 +68,9 @@ def test_credentials_are_host_files_mode_600_and_not_env():
     assert "stat -c '%a'" in body and '"$mode" != "600"' in body
     assert "-r" in body and "-f" in body
     assert re.search(r"apptainer.*(?:--bind|-B)", body, re.S)
-    assert re.search(r"headscale-auth\.key[^\n]*:ro|AUTH_KEY_FILE[^\n]*:ro", body)
-    assert re.search(r"caddy-root\.crt[^\n]*:ro|CA_FILE[^\n]*:ro", body)
+    assert '"$BASE_DIR:/mnt:ro"' in body
+    assert "AUTH_KEY_FILE=/mnt/headscale-auth.key" in body
+    assert "CA_FILE=/mnt/caddy-root.crt" in body
     assert not re.search(r"APPTAINERENV_[A-Z_]*(?:AUTH|KEY|TOKEN|SECRET|PASS)[A-Z_]*", body)
     assert not re.search(r"^\s*qsub\s+.*(?:-v\b|--variable-list)", text(README), re.M)
 
@@ -82,6 +84,23 @@ def test_launcher_proxy_and_runtime_contract():
     assert "--writable" not in body
     assert "--net" not in body and "--network" not in body
     assert "result" in body.lower() and "hostname" in body and "apptainer --version" in body
+
+
+def test_launcher_binds_only_to_existing_image_directories():
+    body = text(PBS)
+    assert '"$STATE_DIR:/tmp"' in body
+    assert '"$BASE_DIR:/mnt:ro"' in body
+    assert "--writable-tmpfs" not in body
+    assert "apptainer exec --cleanenv" in body
+    assert "AUTH_KEY_FILE=/mnt/headscale-auth.key" in body
+    assert "CA_FILE=/mnt/caddy-root.crt" in body
+
+
+def test_proxy_readiness_python_preserves_host_string_literal():
+    body = text(PROBE)
+    readiness = body[body.index("python3 -c \""):body.index("sys.exit(0 if rc == 0 else 1)")]
+    assert "('127.0.0.1', int(" in readiness
+    assert '(("127.0.0.1", int(' not in readiness
 
 
 def test_launcher_cleans_sensitive_node_local_state_on_exit():

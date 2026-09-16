@@ -127,7 +127,7 @@ for _i in $(seq 1 20); do
 import socket, sys
 s = socket.socket()
 s.settimeout(0.5)
-rc = s.connect_ex(("127.0.0.1", int("${CONNECT_PROXY_PORT}")))
+rc = s.connect_ex(('127.0.0.1', int("${CONNECT_PROXY_PORT}")))
 s.close()
 sys.exit(0 if rc == 0 else 1)
 " 2>/dev/null; then

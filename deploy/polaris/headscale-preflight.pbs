@@ -84,12 +84,14 @@ export APPTAINERENV_http_proxy="$http_proxy"
 export APPTAINERENV_https_proxy="$https_proxy"
 
 set +e
-apptainer run --cleanenv \
-  --bind "$STATE_DIR:/tmp/ts-state" \
-  --bind "$RESULT_DIR:/output" \
-  --bind "$AUTH_KEY_FILE:/run/secrets/headscale-auth-key:ro" \
-  --bind "$CA_FILE:/run/secrets/caddy-root.crt:ro" \
-  "$SIF" >"$RESULT_DIR/result.json" 2>"$RESULT_DIR/probe.stderr"
+apptainer exec --cleanenv \
+  --bind "$STATE_DIR:/tmp" \
+  --bind "$BASE_DIR:/mnt:ro" \
+  --env "AUTH_KEY_FILE=/mnt/headscale-auth.key" \
+  --env "CA_FILE=/mnt/caddy-root.crt" \
+  --env "TS_STATE_DIR=/tmp/ts-state" \
+  "$SIF" /usr/local/bin/headscale_probe.sh \
+  >"$RESULT_DIR/result.json" 2>"$RESULT_DIR/probe.stderr"
 probe_rc=$?
 set -e
 
