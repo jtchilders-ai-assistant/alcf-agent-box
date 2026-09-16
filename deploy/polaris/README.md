@@ -1,5 +1,7 @@
 # Polaris Headscale transport preflight
 
+> Current measured status and the next Hermes A2A steps are tracked in [`STATUS.md`](STATUS.md).
+
 This procedure runs the minimal Tailscale transport probe on a Polaris compute node. It does **not** deploy Hermes and does **not** use an A2A token.
 
 ## Pinned artifact
