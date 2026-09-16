@@ -20,6 +20,7 @@ Run:
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import re
 import socket
@@ -148,12 +149,12 @@ class TestConnectProxyStatic:
         assert HEADSCALE_IP in content, \
             f"Numeric IP '{HEADSCALE_IP}' not found in connect_proxy.py"
 
-    def test_reject_non_headscale_by_default(self):
-        """Proxy must reject (fail-closed) destinations other than Headscale."""
+    def test_rejects_malformed_authority(self):
+        """Proxy must reject malformed CONNECT authorities (no host:port)."""
         content = _read(CONNECT_PROXY)
-        # Should have a 403 or 'forbidden' response for unknown destinations
-        assert re.search(r"403|forbidden", content, re.IGNORECASE), \
-            "connect_proxy.py must return 403 Forbidden for non-whitelisted destinations"
+        # Should have a 400 or 403 response for malformed authorities
+        assert re.search(r"400|bad request|malformed", content, re.IGNORECASE), \
+            "connect_proxy.py must return 400 Bad Request for malformed authorities"
 
     def test_chains_to_upstream_proxy(self):
         """Proxy must forward the rewritten CONNECT to an upstream proxy."""
@@ -345,24 +346,25 @@ class TestConnectProxyBehaviour:
             proc.terminate()
             proc.wait(timeout=5)
 
-    def test_non_headscale_connect_is_rejected(self, fake_upstream):
+    def test_non_sslip_connect_forwarded_unchanged_original_section(self, fake_upstream):
         """
-        CONNECT to a non-whitelisted host must be rejected with 403 Forbidden.
-        The fake upstream must NOT receive any connection.
+        CONNECT to any valid host:port OTHER than the sslip.io authority
+        must be forwarded unchanged to upstream (not rejected).
+        This ensures Tailscale DERP/control traffic flows through.
         """
         listen_port = _free_port()
         proc = _start_connect_proxy(listen_port, "127.0.0.1", fake_upstream.port)
         try:
             status_line, _ = _send_connect(
-                listen_port, "evil.example.com:443"
+                listen_port, "example.com:443"
             )
-            assert "403" in status_line or "400" in status_line, (
-                f"Expected 403 for non-whitelisted host, got: {status_line!r}"
+            assert "200" in status_line, (
+                f"Expected 200 for example.com:443 (forwarded unchanged), got: {status_line!r}"
             )
             time.sleep(0.1)
-            assert not fake_upstream.received_connect_lines, (
-                "Fake upstream received a CONNECT for a non-whitelisted host — "
-                "proxy must reject before forwarding (fail-closed)."
+            assert fake_upstream.received_connect_lines, (
+                "Fake upstream must receive a CONNECT for non-sslip authority — "
+                "proxy must forward (not reject) valid CONNECTs."
             )
         finally:
             proc.terminate()
@@ -683,3 +685,453 @@ class TestBuildYMLHeadscaleProbeJob:
         content = _read(BUILD_YML)
         assert re.search(r"push:\s*true", content), \
             "build.yml must push the headscale-probe image (push: true)"
+
+
+# ============================================================================
+# SECTION 7: Task-2 spec blockers — TDD additions
+# ============================================================================
+
+class TestConnectProxyForwardAll:
+    """
+    connect_proxy.py must forward ANY syntactically valid CONNECT authority
+    unchanged to upstream, rewriting ONLY the exact Headscale sslip.io authority.
+    (Design change from fail-closed to pass-through for non-sslip authorities.)
+    """
+
+    def test_non_sslip_connect_forwarded_unchanged(self, fake_upstream):
+        """
+        CONNECT derp1.tailscale.com:443 must be forwarded to upstream AS-IS
+        (not rejected with 403).  Tailscale DERP/control must flow through.
+        """
+        listen_port = _free_port()
+        proc = _start_connect_proxy(listen_port, "127.0.0.1", fake_upstream.port)
+        try:
+            status_line, _ = _send_connect(listen_port, "derp1.tailscale.com:443")
+            assert "200" in status_line, (
+                f"Expected 200 for derp1.tailscale.com:443 (should be forwarded "
+                f"unchanged), got: {status_line!r}"
+            )
+            time.sleep(0.1)
+            assert fake_upstream.received_connect_lines, (
+                "Fake upstream never received a CONNECT for derp1.tailscale.com:443 "
+                "— proxy must forward non-sslip CONNECTs unchanged."
+            )
+            sent = fake_upstream.received_connect_lines[0]
+            assert "derp1.tailscale.com:443" in sent, (
+                f"Upstream must receive original authority unchanged. Got: {sent!r}"
+            )
+        finally:
+            proc.terminate()
+            proc.wait(timeout=5)
+
+    def test_arbitrary_valid_connect_forwarded(self, fake_upstream):
+        """
+        CONNECT example.com:8443 (any valid host:port) must be forwarded unchanged.
+        """
+        listen_port = _free_port()
+        proc = _start_connect_proxy(listen_port, "127.0.0.1", fake_upstream.port)
+        try:
+            status_line, _ = _send_connect(listen_port, "example.com:8443")
+            assert "200" in status_line, (
+                f"Expected 200 for example.com:8443 (forwarded unchanged), "
+                f"got: {status_line!r}"
+            )
+            time.sleep(0.1)
+            assert fake_upstream.received_connect_lines, (
+                "Fake upstream never received CONNECT for example.com:8443"
+            )
+            sent = fake_upstream.received_connect_lines[0]
+            assert "example.com:8443" in sent, (
+                f"Upstream must receive original authority unchanged. Got: {sent!r}"
+            )
+        finally:
+            proc.terminate()
+            proc.wait(timeout=5)
+
+    def test_malformed_authority_still_rejected(self, fake_upstream):
+        """
+        A malformed authority (no colon+port, e.g. 'notahost') must be rejected
+        with 400 or 403 (not forwarded to upstream).
+        """
+        listen_port = _free_port()
+        proc = _start_connect_proxy(listen_port, "127.0.0.1", fake_upstream.port)
+        try:
+            status_line, _ = _send_connect(listen_port, "notahost")
+            assert "400" in status_line or "403" in status_line, (
+                f"Expected 400/403 for malformed authority 'notahost', got: {status_line!r}"
+            )
+            time.sleep(0.1)
+            assert not fake_upstream.received_connect_lines, (
+                "Malformed authority must never reach the upstream proxy."
+            )
+        finally:
+            proc.terminate()
+            proc.wait(timeout=5)
+
+    def test_headscale_sslip_still_rewritten_to_numeric_ip(self, fake_upstream):
+        """
+        CONNECT 143.198.112.69.sslip.io:443 must still be rewritten to
+        CONNECT 143.198.112.69:443 at the upstream (unchanged from original design).
+        """
+        listen_port = _free_port()
+        proc = _start_connect_proxy(listen_port, "127.0.0.1", fake_upstream.port)
+        try:
+            status_line, _ = _send_connect(
+                listen_port, f"{HEADSCALE_HOST}:{HEADSCALE_PORT}"
+            )
+            assert "200" in status_line, (
+                f"Expected 200 for Headscale CONNECT, got: {status_line!r}"
+            )
+            time.sleep(0.1)
+            assert fake_upstream.received_connect_lines, \
+                "Fake upstream never received a CONNECT for Headscale"
+            sent = fake_upstream.received_connect_lines[0]
+            assert HEADSCALE_IP + ":443" in sent, (
+                f"Headscale sslip.io must be rewritten to numeric IP at upstream. "
+                f"Got: {sent!r}"
+            )
+            assert HEADSCALE_HOST not in sent, (
+                f"sslip.io hostname must not reach upstream (must be rewritten). "
+                f"Got: {sent!r}"
+            )
+        finally:
+            proc.terminate()
+            proc.wait(timeout=5)
+
+
+class TestWesleyUrlDefault:
+    """WESLEY_URL default must be http://100.64.0.2:8642/health (includes port+path)."""
+
+    def test_wesley_url_default_includes_port_and_health_path(self):
+        """
+        WESLEY_URL default must be 'http://100.64.0.2:8642/health'.
+        Plain 'http://100.64.0.2/' is wrong — no port and no /health endpoint.
+        """
+        content = _read(PROBE_SCRIPT)
+        assert re.search(
+            r'WESLEY_URL.*100\.64\.0\.2:8642/health',
+            content
+        ), (
+            "WESLEY_URL default must be 'http://100.64.0.2:8642/health' "
+            f"(includes port 8642 and /health path). "
+            "Found instead: "
+            + (re.search(r'WESLEY_URL=.*', content) or type('', (), {'group': lambda s, n: 'NOT FOUND'})()).group(0)  # type: ignore[attr-defined]
+        )
+
+
+class TestHeadscaleTlsValidation:
+    """
+    Probe must perform an explicit Headscale TLS pre-join check:
+    curl --cacert CA_FILE through the local rewrite proxy, requiring HTTP 200
+    from HEADSCALE_URL/health.  Must NOT use -k/--insecure.
+    """
+
+    def test_headscale_health_check_present(self):
+        """Script must explicitly curl HEADSCALE_URL/health before joining."""
+        content = _read(PROBE_SCRIPT)
+        # The curl command is multiline (backslash continuation), so check for
+        # HEADSCALE_URL/health as a URL argument appearing near a curl block.
+        assert re.search(
+            r'HEADSCALE_URL\}/health|HEADSCALE_URL.*health|headscale.*health',
+            content, re.IGNORECASE
+        ) and re.search(r'\bcurl\b', content), (
+            "headscale_probe.sh must curl HEADSCALE_URL/health as a pre-join "
+            "TLS validation step."
+        )
+
+    def test_headscale_health_check_uses_cacert(self):
+        """The Headscale health check curl must use --cacert CA_FILE (no -k)."""
+        content = _read(PROBE_SCRIPT)
+        # The curl is multiline — check that both --cacert and HEADSCALE_URL/health
+        # appear in the same logical command block (within 20 lines of each other).
+        # Use a re.DOTALL block search for the curl command that hits /health.
+        assert re.search(
+            r'curl\s*\\[^}]*--cacert[^}]*HEADSCALE_URL\}/health|'
+            r'curl\s*\\[^Z]*HEADSCALE_URL\}/health[^Z]*--cacert',
+            content, re.DOTALL
+        ) or (
+            re.search(r'--cacert', content) and
+            re.search(r'HEADSCALE_URL\}/health', content)
+        ), (
+            "The Headscale health check curl must use --cacert CA_FILE, not -k."
+        )
+
+    def test_headscale_health_check_http200_required(self):
+        """Health check must verify HTTP 200 response."""
+        content = _read(PROBE_SCRIPT)
+        assert re.search(
+            r'200|http_code.*headscale|headscale.*http_code',
+            content, re.IGNORECASE
+        ), (
+            "Headscale TLS health check must verify HTTP 200 response."
+        )
+
+    def test_headscale_health_result_recorded(self):
+        """Health check result must be recorded in JSON output (_result call)."""
+        content = _read(PROBE_SCRIPT)
+        assert re.search(
+            r'_result.*headscale|headscale.*_result',
+            content, re.IGNORECASE
+        ), (
+            "Headscale health check result must be recorded via _result function."
+        )
+
+    def test_headscale_health_check_through_proxy(self):
+        """The health check curl must route through the local rewrite proxy."""
+        content = _read(PROBE_SCRIPT)
+        # Look for --proxy pointing to 127.0.0.1 near the headscale health curl
+        assert re.search(
+            r'--proxy[^\n]*127\.0\.0\.1|proxy.*headscale.*health|headscale.*health.*proxy',
+            content, re.IGNORECASE
+        ), (
+            "Headscale health check curl must use --proxy 127.0.0.1:CONNECT_PROXY_PORT "
+            "so TLS goes through the local rewrite proxy."
+        )
+
+    def test_tailscale_up_requires_zero_tls_curl_rc_and_http_200(self):
+        """A stale/partial HTTP 200 must not bypass a failed TLS curl."""
+        content = _read(PROBE_SCRIPT)
+        assert re.search(
+            r'if\s+\[\s+"\$\{SOCKET_READY\}"\s+=\s+"true"\s+\]\s+&&\s+'
+            r'\[\s+"\$\{HS_CURL_RC\}"\s+-eq\s+0\s+\]\s+&&\s+'
+            r'\[\s+"\$\{HS_HTTP_CODE\}"\s+=\s+"200"\s+\]',
+            content,
+        ), "tailscale up must require socket ready, curl rc=0, and HTTP 200"
+
+
+class TestProxyReadinessCheck:
+    """
+    After the wait loop, if the connect_proxy never bound, the script must
+    record a failure result and exit rather than blindly continuing.
+    """
+
+    def test_proxy_readiness_failure_recorded(self):
+        """If proxy never binds, _result must record failure before exit."""
+        content = _read(PROBE_SCRIPT)
+        assert re.search(
+            r'PROXY_READY|proxy.*never|connect_proxy.*fail|proxy.*bind.*fail',
+            content, re.IGNORECASE
+        ), (
+            "headscale_probe.sh must check proxy readiness after the wait loop "
+            "and record/emit failure if it never bound."
+        )
+
+    def test_proxy_readiness_exits_on_failure(self):
+        """If proxy never binds, script must exit (not continue blindly)."""
+        content = _read(PROBE_SCRIPT)
+        # Must have conditional logic: if not ready → exit or skip all further steps
+        assert re.search(
+            r'PROXY_READY.*=.*false|PROXY_READY.*=.*true',
+            content
+        ) or re.search(
+            r'proxy.*never.*bind|connect_proxy.*not.*start',
+            content, re.IGNORECASE
+        ), (
+            "headscale_probe.sh must track proxy readiness state and gate "
+            "further steps on it."
+        )
+
+
+class TestTailscaleUpSanitization:
+    """
+    tailscale up output must be suppressed (could expose registration URLs).
+    Only success/failure must be recorded, never raw output.
+    """
+
+    def test_tailscale_up_stdout_not_printed(self):
+        """tailscale up stdout must be redirected (>/dev/null or to variable)."""
+        content = _read(PROBE_SCRIPT)
+        # tailscale up is a multiline backslash-continued command; the redirect
+        # >/dev/null appears on its own continuation line.
+        # Verify: (a) tailscale up invocation exists, (b) >/dev/null 2>/dev/null
+        # appears in the same command block (DOTALL search for the up section).
+        assert re.search(r'timeout[^\n]+"?\$\{TS_UP_TIMEOUT\}[^\n]*tailscale|tailscale[^\n]*--hostname', content), (
+            "tailscale up invocation not found in headscale_probe.sh"
+        )
+        assert re.search(r'>/dev/null', content), (
+            "tailscale up stdout must be redirected (>/dev/null) — "
+            "it could expose registration URLs or secrets."
+        )
+        # Verify the redirect appears within the tailscale up command block
+        assert re.search(
+            r'(?:timeout[^#]*?tailscale|tailscale[^#]*?--hostname)[^#]*?>/dev/null',
+            content, re.DOTALL
+        ), (
+            "tailscale up stdout redirect (>/dev/null) must be part of the "
+            "tailscale up command block, not elsewhere."
+        )
+
+    def test_tailscale_up_stderr_not_printed(self):
+        """tailscale up stderr must not go to stdout/terminal unfiltered."""
+        content = _read(PROBE_SCRIPT)
+        # Must NOT have bare '2>&1' without also redirecting to /dev/null
+        # 2>&1 alone sends both to terminal; acceptable: 2>/dev/null or 2>&1 >/dev/null
+        has_bare_2and1 = bool(re.search(
+            r'tailscale[^\n]*\bup\b[^\n]*2>&1(?![^\n]*>/dev/null)',
+            content
+        ))
+        assert not has_bare_2and1, (
+            "tailscale up must not use bare '2>&1' (exposes stderr). "
+            "Use '>/dev/null 2>&1' or '2>/dev/null'."
+        )
+
+
+class TestJsonConstructedWithPython:
+    """
+    Final JSON must be constructed with Python (json.dumps) to handle paths
+    with quotes/backslashes safely, not shell string interpolation.
+    """
+
+    def test_json_output_uses_python(self):
+        """JSON emission must use Python's json module, not shell echo interpolation."""
+        content = _read(PROBE_SCRIPT)
+        assert re.search(
+            r'python3[^\n]*json|import json|json\.dumps|json\.loads',
+            content, re.IGNORECASE
+        ), (
+            "headscale_probe.sh must use Python to construct/emit JSON output "
+            "to handle paths with special characters safely."
+        )
+
+    def test_no_raw_shell_json_interpolation(self):
+        """Shell echo with raw variable interpolation in JSON must not be used."""
+        content = _read(PROBE_SCRIPT)
+        # Check for echo/printf constructing JSON with unescaped variable expansion
+        # Pattern: echo "..." with ${VAR} inside JSON object (dangerous)
+        dangerous = re.findall(
+            r'echo\s+"[^"]*\$\{[A-Z_]+\}[^"]*"[^"]*\}',
+            content
+        )
+        assert not dangerous, (
+            f"Shell echo JSON interpolation found (unsafe for special chars): "
+            f"{dangerous[:3]}"
+        )
+
+
+# ============================================================================
+# SECTION 8: Additional quality / correctness tests
+# ============================================================================
+
+class TestConnectProxyQuality:
+    """connect_proxy.py quality and correctness properties."""
+
+    def test_header_size_cap(self):
+        """connect_proxy.py must enforce a max header size to prevent unbounded reads."""
+        content = _read(CONNECT_PROXY)
+        # Should have a named cap constant and enforcement in the read loop
+        assert re.search(
+            r"MAX_HEADER_SIZE|max_header|len\(raw\).*>",
+            content
+        ), (
+            "connect_proxy.py must cap incoming CONNECT header size "
+            "to prevent unbounded memory growth."
+        )
+
+    def test_upstream_socket_closed_on_all_paths(self):
+        """Upstream socket must be closed (or context-managed) on every exit path."""
+        content = _read(CONNECT_PROXY)
+        import ast
+        tree = ast.parse(content)
+        # Must use try/finally or context manager on upstream socket
+        has_finally_or_with = bool(
+            re.search(r"up\.close\(\)|with socket", content)
+        )
+        assert has_finally_or_with, (
+            "connect_proxy.py must explicitly close the upstream socket (up.close()) "
+            "on every code path to prevent fd leaks."
+        )
+
+    def test_malformed_authority_rejected_live(self, fake_upstream):
+        """Live: CONNECT with no port must be rejected 400, never forwarded."""
+        listen_port = _free_port()
+        proc = _start_connect_proxy(listen_port, "127.0.0.1", fake_upstream.port)
+        try:
+            status_line, _ = _send_connect(listen_port, "justahostname")
+            assert "400" in status_line or "403" in status_line, (
+                f"Expected 400/403 for no-port authority, got: {status_line!r}"
+            )
+            time.sleep(0.1)
+            assert not fake_upstream.received_connect_lines, (
+                "Malformed authority (no port) must not reach upstream."
+            )
+        finally:
+            proc.terminate()
+            proc.wait(timeout=5)
+
+    def test_proxy_uses_python_socket_readiness(self):
+        """headscale_probe.sh must use an explicit portable socket readiness check."""
+        content = _read(PROBE_SCRIPT)
+        assert "socket.connect_ex" in content, (
+            "headscale_probe.sh must use Python socket.connect_ex for the "
+            "portable proxy readiness check."
+        )
+
+    def test_missing_auth_key_emits_valid_json(self):
+        """A missing auth-key file must return JSON, not a Python KeyError."""
+        env = os.environ.copy()
+        env.update({
+            "AUTH_KEY_FILE": '/tmp/missing-auth-"-file',
+            "CA_FILE": "/tmp/missing-ca-file",
+        })
+        proc = subprocess.run(
+            ["bash", PROBE_SCRIPT],
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+        assert proc.returncode == 1
+        payload = json.loads(proc.stderr)
+        assert payload == {
+            "error": "AUTH_KEY_FILE not readable",
+            "file": '/tmp/missing-auth-"-file',
+        }
+
+    def test_missing_default_auth_key_emits_valid_json(self):
+        """Shell defaults need not be exported for error JSON to work."""
+        env = os.environ.copy()
+        env.pop("AUTH_KEY_FILE", None)
+        env.pop("CA_FILE", None)
+        proc = subprocess.run(
+            ["bash", PROBE_SCRIPT],
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+        assert proc.returncode == 1
+        payload = json.loads(proc.stderr)
+        assert payload["error"] == "AUTH_KEY_FILE not readable"
+        assert payload["file"] == "/run/secrets/headscale-auth-key"
+
+    def test_result_serialization_does_not_add_double_dash_element(self):
+        """The shell-to-Python array bridge must not serialize a literal '--'."""
+        content = _read(PROBE_SCRIPT)
+        assert not re.search(
+            r"json\.dumps\(sys\.argv\[1:\]\).*\s--\s",
+            content,
+        ), "A literal '--' argument becomes a phantom failed result"
+
+    def test_upstream_socket_has_unconditional_finally_close(self):
+        """The connected upstream socket must close after tunnel return/errors."""
+        content = _read(CONNECT_PROXY)
+        assert re.search(
+            r"finally:\s*\n(?:\s+if up is not None:\s*\n)?\s+up\.close\(\)",
+            content,
+        ), "Upstream socket needs an unconditional finally close"
+
+
+class TestTailscaleUpTimeout:
+    """tailscale up must have an explicit timeout to prevent hanging indefinitely."""
+
+    def test_tailscale_up_has_timeout(self):
+        """tailscale up must use --timeout or be wrapped in a timeout command."""
+        content = _read(PROBE_SCRIPT)
+        assert re.search(
+            r"timeout\s+\d+\s+tailscale|tailscale[^\n]*--timeout|"
+            r"timeout\s+\"\$\{[A-Z_]+\}\"[^\n]*tailscale",
+            content
+        ), (
+            "tailscale up must have an explicit timeout (timeout N tailscale up ...) "
+            "to avoid hanging the probe container indefinitely."
+        )

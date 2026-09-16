@@ -16,13 +16,14 @@
 #   CA_FILE                (see above)
 #   HEADSCALE_URL          https://143.198.112.69.sslip.io
 #   WESLEY_IP              100.64.0.2
-#   WESLEY_URL             http://100.64.0.2/
+#   WESLEY_URL             http://100.64.0.2:8642/health
 #   TS_STATE_DIR           /tmp/ts-state
 #   TS_SOCKET              /tmp/tailscaled.sock
 #   TS_SOCKS5_PORT         1055
 #   TS_OUTBOUND_HTTP_PORT  1056
 #   CONNECT_PROXY_PORT     18443
 #   ALCF_PROXY             proxy.alcf.anl.gov:3128
+#   TS_UP_TIMEOUT          60   # seconds for tailscale up timeout
 #
 # Usage:
 #   docker run --rm \
@@ -46,7 +47,7 @@ HEADSCALE_URL="${HEADSCALE_URL:-https://143.198.112.69.sslip.io}"
 HEADSCALE_IP="143.198.112.69"
 
 WESLEY_IP="${WESLEY_IP:-100.64.0.2}"
-WESLEY_URL="${WESLEY_URL:-http://${WESLEY_IP}/}"
+WESLEY_URL="${WESLEY_URL:-http://100.64.0.2:8642/health}"
 
 TS_STATE_DIR="${TS_STATE_DIR:-/tmp/ts-state}"
 TS_SOCKET="${TS_SOCKET:-/tmp/tailscaled.sock}"
@@ -56,15 +57,17 @@ TS_OUTBOUND_HTTP_PORT="${TS_OUTBOUND_HTTP_PORT:-1056}"
 CONNECT_PROXY_PORT="${CONNECT_PROXY_PORT:-18443}"
 ALCF_PROXY="${ALCF_PROXY:-proxy.alcf.anl.gov:3128}"
 
+TS_UP_TIMEOUT="${TS_UP_TIMEOUT:-60}"
+
 # ---------------------------------------------------------------------------
 # Validate required files before doing anything
 # ---------------------------------------------------------------------------
 if [ ! -r "${AUTH_KEY_FILE}" ]; then
-  echo '{"error":"AUTH_KEY_FILE not readable","file":"'"${AUTH_KEY_FILE}"'"}' >&2
+  python3 -c "import json,sys; print(json.dumps({'error':'AUTH_KEY_FILE not readable','file':sys.argv[1]}))" "${AUTH_KEY_FILE}" >&2
   exit 1
 fi
 if [ ! -f "${CA_FILE}" ] || [ ! -r "${CA_FILE}" ]; then
-  echo '{"error":"CA_FILE not readable","file":"'"${CA_FILE}"'"}' >&2
+  python3 -c "import json,sys; print(json.dumps({'error':'CA_FILE not readable','file':sys.argv[1]}))" "${CA_FILE}" >&2
   exit 1
 fi
 
@@ -74,13 +77,17 @@ fi
 export SSL_CERT_FILE="${CA_FILE}"
 
 # ---------------------------------------------------------------------------
-# JSON result accumulator
+# JSON result accumulator (populated via _result; emitted by Python at end)
 # ---------------------------------------------------------------------------
-RESULTS=()
+RESULT_STEPS=()
+RESULT_OKS=()
+RESULT_DETAILS=()
 
 _result() {
   local step="$1" ok="$2" detail="$3"
-  RESULTS+=("{\"step\":\"${step}\",\"ok\":${ok},\"detail\":\"${detail}\"}")
+  RESULT_STEPS+=("${step}")
+  RESULT_OKS+=("${ok}")
+  RESULT_DETAILS+=("${detail}")
 }
 
 # ---------------------------------------------------------------------------
@@ -113,16 +120,66 @@ python3 /usr/local/bin/connect_proxy.py \
   &
 CONNECT_PROXY_PID=$!
 
-# Wait for the proxy to bind
+# Wait for the proxy to bind using Python socket.connect_ex (portable).
+PROXY_READY=false
 for _i in $(seq 1 20); do
-  if 2>/dev/null bash -c "echo > /dev/tcp/127.0.0.1/${CONNECT_PROXY_PORT}"; then
+  if python3 -c "
+import socket, sys
+s = socket.socket()
+s.settimeout(0.5)
+rc = s.connect_ex(("127.0.0.1", int("${CONNECT_PROXY_PORT}")))
+s.close()
+sys.exit(0 if rc == 0 else 1)
+" 2>/dev/null; then
+    PROXY_READY=true
     break
   fi
   sleep 0.2
 done
 
+if [ "${PROXY_READY}" = "false" ]; then
+  _result "connect_proxy_start" false "proxy never bound on port ${CONNECT_PROXY_PORT}"
+  # Emit JSON and exit — no point continuing without the proxy
+  python3 - <<'PYEOF'
+import json, os, sys
+
+steps   = os.environ.get("_RESULT_STEPS_JSON", "")
+oks     = os.environ.get("_RESULT_OKS_JSON", "")
+details = os.environ.get("_RESULT_DETAILS_JSON", "")
+import ast
+result = [
+    {"step": "connect_proxy_start", "ok": False,
+     "detail": "proxy never bound on port " + os.environ.get("CONNECT_PROXY_PORT", "18443")}
+]
+print(json.dumps({"overall_ok": False, "results": result}, indent=2))
+PYEOF
+  exit 1
+fi
+
 # ---------------------------------------------------------------------------
-# 2. Start tailscaled in userspace-networking mode.
+# 2. Explicit Headscale TLS validation via connect_proxy (pre-join check).
+#    Uses --cacert CA_FILE; never -k.  Routes through the local rewrite proxy
+#    so the sslip.io → numeric-IP rewrite is exercised before tailscale joins.
+# ---------------------------------------------------------------------------
+HS_HTTP_CODE=""
+HS_CURL_RC=0
+HS_HTTP_CODE=$(curl \
+  --proxy "http://127.0.0.1:${CONNECT_PROXY_PORT}" \
+  --cacert "${CA_FILE}" \
+  --silent \
+  --max-time 15 \
+  --write-out "%{http_code}" \
+  --output /dev/null \
+  "${HEADSCALE_URL}/health" 2>/dev/null) || HS_CURL_RC=$?
+
+if [ "${HS_CURL_RC}" -eq 0 ] && [ "${HS_HTTP_CODE}" = "200" ]; then
+  _result "headscale_tls_check" true "HTTP 200 from ${HEADSCALE_URL}/health"
+else
+  _result "headscale_tls_check" false "rc=${HS_CURL_RC} http=${HS_HTTP_CODE}"
+fi
+
+# ---------------------------------------------------------------------------
+# 3. Start tailscaled in userspace-networking mode.
 #    Its http_proxy / https_proxy points to the local rewrite proxy so that
 #    the Headscale connection goes through connect_proxy → ALCF proxy.
 # ---------------------------------------------------------------------------
@@ -160,24 +217,30 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 3. Connect to Headscale via tailscale up
+# 4. Connect to Headscale via tailscale up (with output suppressed to avoid
+#    leaking registration URLs or auth tokens, and with an explicit timeout).
+#    Gated on: socket ready AND TLS preflight returned HTTP 200.
 # ---------------------------------------------------------------------------
-if [ "${SOCKET_READY}" = "true" ]; then
-  if tailscale \
+if [ "${SOCKET_READY}" = "true" ] && [ "${HS_CURL_RC}" -eq 0 ] && [ "${HS_HTTP_CODE}" = "200" ]; then
+  TS_UP_RC=0
+  timeout "${TS_UP_TIMEOUT}" tailscale \
       --socket="${TS_SOCKET}" \
       up \
       --auth-key=file:"${AUTH_KEY_FILE}" \
       --login-server="${HEADSCALE_URL}" \
       --hostname="probe-$(hostname)" \
-      2>&1; then
+      >/dev/null 2>/dev/null || TS_UP_RC=$?
+  if [ "${TS_UP_RC}" -eq 0 ]; then
     _result "tailscale_up" true "connected"
+  elif [ "${TS_UP_RC}" -eq 124 ]; then
+    _result "tailscale_up" false "tailscale up timed out after ${TS_UP_TIMEOUT}s"
   else
-    _result "tailscale_up" false "tailscale up failed"
+    _result "tailscale_up" false "tailscale up exited rc=${TS_UP_RC}"
   fi
 fi
 
 # ---------------------------------------------------------------------------
-# 4. Wait for tailscale status to show BackendState=Running
+# 5. Wait for tailscale status to show BackendState=Running
 # ---------------------------------------------------------------------------
 TS_RUNNING=false
 for _i in $(seq 1 30); do
@@ -196,7 +259,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 5. Ping WESLEY_IP over the Tailscale tunnel
+# 6. Ping WESLEY_IP over the Tailscale tunnel
 # ---------------------------------------------------------------------------
 if [ "${TS_RUNNING}" = "true" ]; then
   if tailscale --socket="${TS_SOCKET}" ping --c=3 "${WESLEY_IP}" >/dev/null 2>&1; then
@@ -209,9 +272,8 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 6. curl WESLEY_URL through the SOCKS5 proxy
+# 7. curl WESLEY_URL through the SOCKS5 proxy
 # ---------------------------------------------------------------------------
-SOCKS5_PROXY="socks5://127.0.0.1:${TS_SOCKS5_PORT}"
 CURL_OUT=""
 CURL_RC=0
 if [ "${TS_RUNNING}" = "true" ]; then
@@ -233,30 +295,27 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 7. Emit JSON summary
+# 8. Emit JSON summary — built with Python to safely handle special chars
+#    in paths (quotes, backslashes, etc.)
 # ---------------------------------------------------------------------------
-OVERALL="true"
-for r in "${RESULTS[@]}"; do
-  if echo "${r}" | grep -q '"ok":false'; then
-    OVERALL="false"
-    break
-  fi
-done
+_STEPS_JSON=$(python3 -c "import json,sys; print(json.dumps(sys.argv[1:]))" "${RESULT_STEPS[@]+"${RESULT_STEPS[@]}"}")
+_OKS_JSON=$(python3 -c "import json,sys; print(json.dumps(sys.argv[1:]))" "${RESULT_OKS[@]+"${RESULT_OKS[@]}"}")
+_DETAILS_JSON=$(python3 -c "import json,sys; print(json.dumps(sys.argv[1:]))" "${RESULT_DETAILS[@]+"${RESULT_DETAILS[@]}"}")
+export _STEPS_JSON _OKS_JSON _DETAILS_JSON
 
-echo "{"
-echo "  \"overall_ok\": ${OVERALL},"
-echo "  \"results\": ["
-LAST=$(( ${#RESULTS[@]} - 1 ))
-for i in "${!RESULTS[@]}"; do
-  if [ "${i}" -eq "${LAST}" ]; then
-    echo "    ${RESULTS[$i]}"
-  else
-    echo "    ${RESULTS[$i]},"
-  fi
-done
-echo "  ]"
-echo "}"
+python3 - <<'PYEOF'
+import json, os, sys
 
-if [ "${OVERALL}" = "false" ]; then
-  exit 1
-fi
+steps   = json.loads(os.environ["_STEPS_JSON"])
+oks_raw = json.loads(os.environ["_OKS_JSON"])
+details = json.loads(os.environ["_DETAILS_JSON"])
+
+results = [
+    {"step": s, "ok": (o == "true"), "detail": d}
+    for s, o, d in zip(steps, oks_raw, details)
+]
+overall_ok = all(r["ok"] for r in results) if results else False
+print(json.dumps({"overall_ok": overall_ok, "results": results}, indent=2))
+# Exit non-zero if any step failed so the container has a meaningful exit code.
+sys.exit(0 if overall_ok else 1)
+PYEOF

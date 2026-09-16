@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
 """
-connect_proxy.py — fail-closed local CONNECT rewrite proxy.
+connect_proxy.py — selective CONNECT rewrite proxy.
 
 Listens on 127.0.0.1 (loopback only). Accepts ONLY the HTTP CONNECT method.
-Rewrites EXACTLY the Headscale sslip.io authority to its numeric IP before
-forwarding to the upstream ALCF proxy.  All other destinations are rejected
-with 403 Forbidden.
+
+Routing behaviour:
+  • CONNECT 143.198.112.69.sslip.io:443
+      → rewritten to CONNECT 143.198.112.69:443 before forwarding upstream.
+        Bypasses the Polaris sslip.io DNS sinkhole while preserving TLS SNI.
+  • CONNECT <any other syntactically valid host:port>
+      → forwarded unchanged to the configured upstream proxy.
+        Tailscale DERP/control and all other traffic pass through unmodified.
+  • Non-CONNECT HTTP methods → 405 Method Not Allowed.
+  • Malformed CONNECT authority (missing port) → 400 Bad Request.
 
 TLS bytes are tunnelled as-is (no ssl module — end-to-end TLS preserved).
 
@@ -17,7 +24,6 @@ Environment:
                      Overridden by --upstream flag if provided.
 
 Design notes:
-  • Fail-closed: unknown destinations → 403 (never forwarded).
   • CONNECT-only: any other HTTP method → 405 Method Not Allowed.
   • No ssl module used; TLS remains end-to-end with original SNI intact.
   • No third-party dependencies; stdlib only.
@@ -39,15 +45,19 @@ import threading
 # Constants
 # ---------------------------------------------------------------------------
 
-# The ONLY authority that this proxy will forward.  Requests targeting any
-# other host are rejected with 403 Forbidden (fail-closed).
+# The ONLY authority that gets a special hostname rewrite before forwarding.
 HEADSCALE_AUTHORITY   = "143.198.112.69.sslip.io:443"
 HEADSCALE_REWRITE_TO  = "143.198.112.69:443"
 
-LISTEN_HOST    = "127.0.0.1"
-DEFAULT_PORT   = 18443
-BUFSIZE        = 65536
-CONN_TIMEOUT   = 15  # seconds to establish upstream connection
+LISTEN_HOST     = "127.0.0.1"
+DEFAULT_PORT    = 18443
+BUFSIZE         = 65536
+CONN_TIMEOUT    = 15    # seconds to establish upstream connection
+MAX_HEADER_SIZE = 16384  # 16 KiB cap on incoming CONNECT header block
+
+# Pattern for a syntactically valid CONNECT authority: host:port
+# Rejects bare hostnames with no port (malformed) and empty strings.
+_AUTHORITY_RE = re.compile(r"^[^\s:]+:\d+$")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -113,6 +123,7 @@ def _tunnel(client: socket.socket, upstream: socket.socket) -> None:
 
 def _handle_client(conn: socket.socket, addr: tuple, upstream_host: str,
                    upstream_port: int) -> None:
+    up: socket.socket | None = None
     try:
         conn.settimeout(CONN_TIMEOUT)
         raw = b""
@@ -121,6 +132,10 @@ def _handle_client(conn: socket.socket, addr: tuple, upstream_host: str,
             if not chunk:
                 return
             raw += chunk
+            if len(raw) > MAX_HEADER_SIZE:
+                log.warning("Header size limit exceeded (%d bytes) from %s", len(raw), addr[0])
+                conn.sendall(b"HTTP/1.1 400 Bad Request\r\nX-Reason: header too large\r\n\r\n")
+                return
 
         parsed = _parse_connect(raw)
         if parsed is None:
@@ -139,23 +154,27 @@ def _handle_client(conn: socket.socket, addr: tuple, upstream_host: str,
             )
             return
 
-        # Fail-closed: only allow the exact Headscale authority.
-        if authority != HEADSCALE_AUTHORITY:
+        # Validate authority is syntactically a host:port pair.
+        if not _AUTHORITY_RE.match(authority):
             log.warning(
-                "Blocked CONNECT to non-whitelisted authority: %s from %s",
-                authority, addr[0],
+                "Rejected malformed authority: %r from %s", authority, addr[0]
             )
             conn.sendall(
-                b"HTTP/1.1 403 Forbidden\r\n"
-                b"X-Reason: destination not in allowlist\r\n"
+                b"HTTP/1.1 400 Bad Request\r\n"
+                b"X-Reason: authority must be host:port\r\n"
                 b"\r\n"
             )
             return
 
-        # Rewrite the authority to the numeric IP (bypass sslip.io sinkhole).
-        rewritten_authority = HEADSCALE_REWRITE_TO
-        log.info("CONNECT %s -> rewrite -> CONNECT %s (upstream %s:%d)",
-                 authority, rewritten_authority, upstream_host, upstream_port)
+        # Rewrite ONLY the Headscale sslip.io authority; forward all others unchanged.
+        if authority == HEADSCALE_AUTHORITY:
+            rewritten_authority = HEADSCALE_REWRITE_TO
+            log.info("CONNECT %s -> rewrite -> CONNECT %s (upstream %s:%d)",
+                     authority, rewritten_authority, upstream_host, upstream_port)
+        else:
+            rewritten_authority = authority
+            log.info("CONNECT %s -> forward unchanged (upstream %s:%d)",
+                     authority, upstream_host, upstream_port)
 
         # Connect to the upstream ALCF proxy.
         try:
@@ -168,7 +187,7 @@ def _handle_client(conn: socket.socket, addr: tuple, upstream_host: str,
             conn.sendall(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
             return
 
-        # Forward rewritten CONNECT to upstream.
+        # Forward CONNECT to upstream (rewritten or original authority).
         connect_req = (
             f"CONNECT {rewritten_authority} HTTP/1.1\r\n"
             f"Host: {rewritten_authority}\r\n"
@@ -211,6 +230,8 @@ def _handle_client(conn: socket.socket, addr: tuple, upstream_host: str,
     except Exception as exc:  # pylint: disable=broad-except
         log.exception("Unhandled error in handler: %s", exc)
     finally:
+        if up is not None:
+            up.close()
         conn.close()
 
 
@@ -232,7 +253,7 @@ def _parse_upstream(upstream_str: str) -> tuple[str, int]:
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
-        description="Fail-closed CONNECT rewrite proxy for Headscale/Polaris"
+        description="Selective CONNECT rewrite proxy for Headscale/Polaris"
     )
     parser.add_argument(
         "--listen-port", type=int, default=DEFAULT_PORT,
@@ -250,7 +271,8 @@ def main(argv: list[str] | None = None) -> None:
 
     log.info("Starting connect_proxy on %s:%d → upstream %s:%d",
              LISTEN_HOST, args.listen_port, upstream_host, upstream_port)
-    log.info("Allowlist: CONNECT %s → %s", HEADSCALE_AUTHORITY, HEADSCALE_REWRITE_TO)
+    log.info("Rewrite: CONNECT %s → %s (all other valid CONNECTs forwarded unchanged)",
+             HEADSCALE_AUTHORITY, HEADSCALE_REWRITE_TO)
 
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
