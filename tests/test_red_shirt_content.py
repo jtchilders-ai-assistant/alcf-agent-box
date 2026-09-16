@@ -23,6 +23,22 @@ REQUIRED_COPY_DESTINATIONS = (
     "/opt/red-shirt-polaris/skills/",
 )
 
+# Complete, exact COPY directives (source -> destination, including the
+# tailscale-src stage COPYs). Order-independent set comparison: a build that
+# swaps a source path for the wrong file (while keeping the destination
+# unchanged) must fail this test.
+REQUIRED_COPY_DIRECTIVES = (
+    "COPY --from=tailscale-src /usr/local/bin/tailscale /usr/local/bin/tailscale",
+    "COPY --from=tailscale-src /usr/local/bin/tailscaled /usr/local/bin/tailscaled",
+    "COPY scripts/connect_proxy.py /opt/red-shirt-polaris/connect_proxy.py",
+    "COPY scripts/red_shirt_config.py /opt/red-shirt-polaris/red_shirt_config.py",
+    "COPY scripts/red_shirt_probe.py /opt/red-shirt-polaris/red_shirt_probe.py",
+    "COPY scripts/red_shirt_entrypoint.sh /opt/red-shirt-polaris/entrypoint.sh",
+    "COPY config/red-shirt-polaris/ /opt/red-shirt-polaris/config/",
+    "COPY docs/polaris-snapshot/ /opt/red-shirt-polaris/docs/",
+    "COPY skills/ /opt/red-shirt-polaris/skills/",
+)
+
 
 def _dockerfile_lines():
     return (ROOT / "Dockerfile.red-shirt-polaris").read_text().splitlines()
@@ -59,6 +75,23 @@ def test_dockerfile_copies_every_required_content_path():
     text = (ROOT / "Dockerfile.red-shirt-polaris").read_text()
     for destination in REQUIRED_COPY_DESTINATIONS:
         assert destination in text, f"missing required COPY destination: {destination}"
+
+
+def test_dockerfile_copy_directives_match_exact_source_and_destination():
+    lines = [line.strip() for line in _dockerfile_lines()]
+    copy_lines = {line for line in lines if line.startswith("COPY ")}
+    for directive in REQUIRED_COPY_DIRECTIVES:
+        assert directive in copy_lines, f"missing exact COPY directive: {directive}"
+    # No unexpected extra COPY into the required destinations set (guards
+    # against a source-path swap that still lands on the right destination
+    # but drags in wrong/duplicate content).
+    required_destinations = {d.split(" ")[-1] for d in REQUIRED_COPY_DIRECTIVES}
+    for line in copy_lines:
+        dest = line.split(" ")[-1]
+        if dest in required_destinations:
+            assert line in REQUIRED_COPY_DIRECTIVES, (
+                f"unexpected COPY directive targeting a required destination: {line}"
+            )
 
 
 def test_final_user_and_entrypoint_ordering_is_non_root_last():
@@ -131,6 +164,14 @@ def test_red_shirt_job_is_dedicated_and_isolated_from_other_jobs():
     assert with_block["cache-from"] == "type=gha,scope=red-shirt-polaris-${{ github.sha }}"
     assert with_block["cache-to"] == "type=gha,scope=red-shirt-polaris-${{ github.sha }},mode=max"
 
+    # The published image must be commit-addressed (design requires a
+    # SHA-tagged, immutable publish target, not only a floating :latest).
+    meta_step = next(
+        s for s in job["steps"] if s.get("uses", "").startswith("docker/metadata-action@")
+    )
+    meta_tags = meta_step["with"]["tags"]
+    assert "type=sha,format=short" in meta_tags
+
     # The dedicated job must not be the existing laptop/probe jobs, and those
     # jobs must not have been repointed at the new Dockerfile/image.
     assert set(jobs.keys()) >= {"build", "build-headscale-probe", "build-red-shirt-polaris"}
@@ -147,9 +188,6 @@ def test_red_shirt_job_is_dedicated_and_isolated_from_other_jobs():
 
     # metadata-action image target must resolve to the dedicated image name,
     # not the laptop image or the headscale probe image.
-    meta_step = next(
-        s for s in job["steps"] if s.get("uses", "").startswith("docker/metadata-action@")
-    )
     assert meta_step["with"]["images"] == "${{ env.RED_SHIRT_POLARIS_IMAGE }}"
     assert (
         workflow["env"]["RED_SHIRT_POLARIS_IMAGE"]
