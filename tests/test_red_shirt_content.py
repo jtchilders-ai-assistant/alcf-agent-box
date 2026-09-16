@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 import yaml
@@ -204,6 +205,33 @@ def test_soul_states_compute_identity_and_docs_contract():
     ):
         assert phrase in soul, f"SOUL.md missing required phrase: {phrase}"
     assert "cite the local source path" in soul.lower()
+    # Identity must be exact, not merely a substring that would still be
+    # present in a renamed/suffixed identity (e.g. "Red Shirt Polaris Mini").
+    identity_line = next(
+        line for line in soul.splitlines() if line.startswith("You are Red Shirt Polaris")
+    )
+    assert identity_line.startswith(
+        "You are Red Shirt Polaris, a Hermes agent running inside an Apptainer"
+    ), f"unexpected identity framing: {identity_line!r}"
+    lowered = soul.lower()
+    # Authenticated, per-direction A2A relationship with Wesley — not just
+    # the bare word "A2A" somewhere in the file.
+    assert "authenticated" in lowered and "a2a" in lowered
+    assert "per-direction" in lowered or "per direction" in lowered
+    assert "bearer" in lowered
+    assert "does not accept" in lowered or "do not accept" in lowered
+    assert "unauthenticated a2a" in lowered
+    # Explicit read-before-act docs contract, not just a bare path mention.
+    assert "read " in lowered and "/opt/red-shirt-polaris/docs/readme.md" in lowered
+    assert (
+        "before" in lowered
+        and "polaris-specific" in lowered
+        and ("advice" in lowered or "action" in lowered)
+    )
+    # Explicit official-vs-local classification and non-policy framing.
+    assert "official snapshot" in lowered
+    assert "local deployment note" in lowered or "locally measured" in lowered
+    assert "not alcf policy" in lowered or "not official alcf" in lowered
 
 
 def test_soul_is_non_roleplay_and_covers_full_operating_contract():
@@ -242,6 +270,109 @@ def test_doc_index_records_retrieval_date_and_classification_values():
     assert "2026-09-16" in index
     assert "official" in index.lower()
     assert "local" in index.lower()
+
+
+def _parse_markdown_tables(text):
+    """Parse pipe-delimited Markdown tables into (header, rows) pairs.
+
+    Independent of the specific column set so it works for both the
+    official-docs table (Canonical URL) and the local-notes table (Source).
+    """
+    lines = text.splitlines()
+    tables = []
+    i = 0
+    separator_re = re.compile(r"^\|[-\s|]+\|$")
+    while i < len(lines):
+        line = lines[i].strip()
+        if line.startswith("|") and i + 1 < len(lines) and separator_re.match(lines[i + 1].strip()):
+            header = [c.strip() for c in line.strip("|").split("|")]
+            rows = []
+            j = i + 2
+            while j < len(lines) and lines[j].strip().startswith("|"):
+                rows.append([c.strip() for c in lines[j].strip().strip("|").split("|")])
+                j += 1
+            tables.append((header, rows))
+            i = j
+            continue
+        i += 1
+    return tables
+
+
+def _row_field(header, row, *names):
+    for name in names:
+        if name in header:
+            return row[header.index(name)]
+    raise AssertionError(f"none of {names} present in table header {header}")
+
+
+def test_doc_index_row_metadata_is_independently_complete_per_snapshot():
+    """Requirement 7: a single incomplete index row must fail the suite even
+    when every other row and every global keyword check still passes.
+
+    This walks every parsed row rather than checking the document text as a
+    whole, so deleting a single date/URL/classification cell — while leaving
+    the words "Canonical URL", "2026-09-16", "official", and "local"
+    present elsewhere in the file — still fails.
+    """
+    root = ROOT / "docs/polaris-snapshot"
+    index_path = root / "README.md"
+    index = index_path.read_text()
+    tables = _parse_markdown_tables(index)
+    assert tables, "no Markdown tables found in docs/polaris-snapshot/README.md"
+
+    on_disk = {str(p.relative_to(root)) for p in root.glob("*/*.md")}
+    indexed_paths = set()
+
+    date_re = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+    for header, rows in tables:
+        assert rows, f"table with header {header} has no data rows"
+        for row in rows:
+            assert len(row) == len(header), (
+                f"row {row!r} does not match header {header!r} (missing/extra cell)"
+            )
+            title = _row_field(header, row, "Title")
+            provenance = _row_field(header, row, "Canonical URL", "Source")
+            retrieved = _row_field(header, row, "Retrieved")
+            local_path_cell = _row_field(header, row, "Local path")
+            classification = _row_field(header, row, "Classification")
+
+            local_path = local_path_cell.strip("`")
+
+            assert title, f"row for {local_path!r} is missing a Title"
+            assert provenance, f"row for {local_path!r} is missing canonical URL / provenance"
+            assert date_re.match(retrieved), (
+                f"row for {local_path!r} has missing/malformed Retrieved date: {retrieved!r}"
+            )
+            assert retrieved == "2026-09-16", (
+                f"row for {local_path!r} has unexpected retrieval date: {retrieved!r}"
+            )
+            assert local_path, f"row is missing a Local path: {row!r}"
+            assert local_path in on_disk, (
+                f"row references {local_path!r}, which is not a real file under docs/polaris-snapshot"
+            )
+            assert classification.lower() in ("official", "local"), (
+                f"row for {local_path!r} has missing/invalid Classification: {classification!r}"
+            )
+            # Classification must match the file's actual directory, not just
+            # be present as a legal value.
+            expected_classification = local_path.split("/", 1)[0]
+            assert classification.lower() == expected_classification, (
+                f"row for {local_path!r} claims classification {classification!r} "
+                f"but lives under {expected_classification!r}"
+            )
+            if expected_classification == "official":
+                assert provenance.startswith("http"), (
+                    f"official row for {local_path!r} must cite a real canonical URL, got {provenance!r}"
+                )
+
+            indexed_paths.add(local_path)
+
+    assert indexed_paths == on_disk, (
+        "index rows and on-disk snapshot files must match exactly: "
+        f"missing from index={on_disk - indexed_paths}, "
+        f"stale in index={indexed_paths - on_disk}"
+    )
 
 
 def test_official_snapshots_cover_minimum_required_topics():
