@@ -193,3 +193,97 @@ def test_red_shirt_job_is_dedicated_and_isolated_from_other_jobs():
         workflow["env"]["RED_SHIRT_POLARIS_IMAGE"]
         == "ghcr.io/${{ github.repository_owner }}/alcf-red-shirt-polaris"
     )
+
+
+def test_soul_states_compute_identity_and_docs_contract():
+    soul = (ROOT / "config/red-shirt-polaris/SOUL.md").read_text()
+    for phrase in (
+        "Red Shirt Polaris", "Apptainer", "PBS job", "Polaris compute node",
+        "ALCF Inference Service", "Wesley", "standard A2A",
+        "proxy.alcf.anl.gov:3128", "/opt/red-shirt-polaris/docs/README.md",
+    ):
+        assert phrase in soul, f"SOUL.md missing required phrase: {phrase}"
+    assert "cite the local source path" in soul.lower()
+
+
+def test_soul_is_non_roleplay_and_covers_full_operating_contract():
+    soul = (ROOT / "config/red-shirt-polaris/SOUL.md").read_text()
+    lowered = soul.lower()
+    # No Star Trek role-play / catchphrase framing.
+    for banned in ("captain", "away team", "beam me", "red alert", "phaser"):
+        assert banned not in lowered, f"SOUL.md must not role-play: found {banned!r}"
+    for phrase in (
+        "no docker",
+        "privileged networking",
+        "ssh",
+        "explicitly mounted",
+        "distinguish",
+        "verify",
+        "readback",
+        "uncertainty",
+        "security",
+        "allocation",
+        "job lifetime",
+    ):
+        assert phrase in lowered, f"SOUL.md missing required operating phrase: {phrase}"
+
+
+def test_doc_index_has_provenance_for_every_snapshot():
+    index = (ROOT / "docs/polaris-snapshot/README.md").read_text()
+    docs = list((ROOT / "docs/polaris-snapshot").glob("*/*.md"))
+    assert docs
+    for doc in docs:
+        assert str(doc.relative_to(ROOT / "docs/polaris-snapshot")) in index
+    assert "Canonical URL" in index and "Retrieved" in index and "Classification" in index
+
+
+def test_doc_index_records_retrieval_date_and_classification_values():
+    index = (ROOT / "docs/polaris-snapshot/README.md").read_text()
+    assert "2026-09-16" in index
+    assert "official" in index.lower()
+    assert "local" in index.lower()
+
+
+def test_official_snapshots_cover_minimum_required_topics():
+    official_dir = ROOT / "docs/polaris-snapshot/official"
+    assert official_dir.is_dir()
+    files = list(official_dir.glob("*.md"))
+    assert files, "no official snapshot files present"
+    combined = "\n".join(f.read_text().lower() for f in files)
+    combined_names = " ".join(f.name.lower() for f in files)
+    # Minimum topics from the design/plan: overview/getting-started, PBS/job
+    # queues, filesystems/storage, modules/programming environment,
+    # containers/Apptainer, node-local storage.
+    for topic_markers in (
+        ("getting started", "overview"),
+        ("pbs", "queue"),
+        ("filesystem", "storage"),
+        ("module", "programming environment"),
+        ("apptainer", "container"),
+        ("local scratch", "node-local", "/local/scratch"),
+    ):
+        assert any(marker in combined or marker in combined_names for marker in topic_markers), (
+            f"no official snapshot covers required topic markers: {topic_markers}"
+        )
+
+
+def test_official_snapshots_are_real_fetched_content_not_fabricated_stubs():
+    official_dir = ROOT / "docs/polaris-snapshot/official"
+    for f in official_dir.glob("*.md"):
+        text = f.read_text()
+        assert len(text) > 500, f"{f} looks too small to be real fetched doc content"
+
+
+def test_local_deployment_notes_are_explicitly_non_official():
+    notes = (ROOT / "docs/polaris-snapshot/local/deployment-notes.md").read_text()
+    lowered = notes.lower()
+    assert "not official alcf policy" in lowered or "not an official alcf" in lowered
+    assert "tailscale" in lowered
+    assert "derp" in lowered
+    assert "proxy.alcf.anl.gov:3128" in notes
+    # Real port check, not ICMP ping, per measured findings.
+    assert "ping" not in lowered or "not" in lowered
+    assert "http" in lowered
+
+    index = (ROOT / "docs/polaris-snapshot/README.md").read_text()
+    assert "local/deployment-notes.md" in index
