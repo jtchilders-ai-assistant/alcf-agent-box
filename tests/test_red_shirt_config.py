@@ -142,62 +142,134 @@ class TestValidateSecrets:
         assert "OK" in result.stdout
 
     def test_missing_file_fails_closed(self, tmp_path):
+        _, _, outbound = _secrets(tmp_path)
+        headscale = _write(tmp_path / "headscale.key", "c" * 10)
         result = run_cli([
             "validate-secrets",
+            "--headscale-key", str(headscale),
             "--inbound-a2a", str(tmp_path / "does-not-exist"),
+            "--outbound-a2a", str(outbound),
         ])
         assert result.returncode != 0
         assert "does not exist" in result.stderr
 
     def test_wrong_mode_rejected(self, tmp_path):
+        headscale, _, outbound = _secrets(tmp_path)
         bad = _write(tmp_path / "bad.token", "x" * 20, mode=0o644)
-        result = run_cli(["validate-secrets", "--inbound-a2a", str(bad)])
+        result = run_cli([
+            "validate-secrets",
+            "--headscale-key", str(headscale),
+            "--inbound-a2a", str(bad),
+            "--outbound-a2a", str(outbound),
+        ])
         assert result.returncode != 0
         assert "0600" in result.stderr
 
     def test_empty_file_rejected(self, tmp_path):
+        headscale, _, outbound = _secrets(tmp_path)
         empty = _write(tmp_path / "empty.token", "")
-        result = run_cli(["validate-secrets", "--inbound-a2a", str(empty)])
+        result = run_cli([
+            "validate-secrets",
+            "--headscale-key", str(headscale),
+            "--inbound-a2a", str(empty),
+            "--outbound-a2a", str(outbound),
+        ])
         assert result.returncode != 0
         assert "empty" in result.stderr.lower()
 
     def test_directory_rejected(self, tmp_path):
+        headscale, _, outbound = _secrets(tmp_path)
         d = tmp_path / "a_directory"
         d.mkdir()
-        result = run_cli(["validate-secrets", "--inbound-a2a", str(d)])
+        result = run_cli([
+            "validate-secrets",
+            "--headscale-key", str(headscale),
+            "--inbound-a2a", str(d),
+            "--outbound-a2a", str(outbound),
+        ])
         assert result.returncode != 0
         assert "not a regular file" in result.stderr.lower()
 
     def test_short_a2a_token_rejected(self, tmp_path):
+        headscale, _, outbound = _secrets(tmp_path)
         short = _write(tmp_path / "short.token", "tooshort")
-        result = run_cli(["validate-secrets", "--inbound-a2a", str(short)])
+        result = run_cli([
+            "validate-secrets",
+            "--headscale-key", str(headscale),
+            "--inbound-a2a", str(short),
+            "--outbound-a2a", str(outbound),
+        ])
         assert result.returncode != 0
         assert "16" in result.stderr
 
     def test_a2a_token_exactly_16_chars_accepted(self, tmp_path):
+        headscale, _, outbound = _secrets(tmp_path)
         exact = _write(tmp_path / "exact.token", "x" * 16)
-        result = run_cli(["validate-secrets", "--inbound-a2a", str(exact)])
+        result = run_cli([
+            "validate-secrets",
+            "--headscale-key", str(headscale),
+            "--inbound-a2a", str(exact),
+            "--outbound-a2a", str(outbound),
+        ])
         assert result.returncode == 0
 
     def test_headscale_key_has_no_minimum_length(self, tmp_path):
         # The headscale join key is not an A2A bearer token — no 16-char floor.
+        _, inbound, outbound = _secrets(tmp_path)
         short = _write(tmp_path / "hs.key", "short")
-        result = run_cli(["validate-secrets", "--headscale-key", str(short)])
+        result = run_cli([
+            "validate-secrets",
+            "--headscale-key", str(short),
+            "--inbound-a2a", str(inbound),
+            "--outbound-a2a", str(outbound),
+        ])
         assert result.returncode == 0
 
     def test_secret_value_never_appears_in_output(self, tmp_path):
+        headscale, _, outbound = _secrets(tmp_path)
         secret_value = "unique-secret-value-abcdef123456"
         token_path = _write(tmp_path / "t.token", secret_value)
-        result = run_cli(["validate-secrets", "--inbound-a2a", str(token_path)])
+        result = run_cli([
+            "validate-secrets",
+            "--headscale-key", str(headscale),
+            "--inbound-a2a", str(token_path),
+            "--outbound-a2a", str(outbound),
+        ])
         assert secret_value not in result.stdout
         assert secret_value not in result.stderr
 
     def test_symlink_rejected(self, tmp_path):
+        headscale, _, outbound = _secrets(tmp_path)
         real = _write(tmp_path / "real.token", "x" * 20)
         link = tmp_path / "link.token"
         link.symlink_to(real)
-        result = run_cli(["validate-secrets", "--inbound-a2a", str(link)])
+        result = run_cli([
+            "validate-secrets",
+            "--headscale-key", str(headscale),
+            "--inbound-a2a", str(link),
+            "--outbound-a2a", str(outbound),
+        ])
         assert result.returncode != 0
+
+    def test_missing_all_arguments_rejected(self, tmp_path):
+        """Regression for reviewer finding 1: bare `validate-secrets` with no
+        credential arguments must fail closed (argparse usage error), never
+        print `secrets: OK` / exit 0."""
+        result = run_cli(["validate-secrets"])
+        assert result.returncode != 0
+        assert "OK" not in result.stdout
+        assert "required" in result.stderr.lower()
+
+    def test_missing_one_of_three_arguments_rejected(self, tmp_path):
+        headscale, inbound, _ = _secrets(tmp_path)
+        result = run_cli([
+            "validate-secrets",
+            "--headscale-key", str(headscale),
+            "--inbound-a2a", str(inbound),
+            # --outbound-a2a intentionally omitted
+        ])
+        assert result.returncode != 0
+        assert "outbound-a2a" in result.stderr
 
 
 # ---------------------------------------------------------------------------
@@ -342,10 +414,18 @@ class TestRenderedConfig:
         assert outbound_secret not in raw
 
     def test_no_unresolved_env_placeholders_except_the_two_secret_refs(self, tmp_path):
-        """Requirement 8: generated files must contain no unresolved ${...}
-        placeholders. The renderer resolves every templated field to a
-        literal EXCEPT the two credential fields, which must remain as
-        ${VAR} env references (never embedded token literals)."""
+        """Requirement 8 (amended by manager decision reconciling reviewer
+        finding 2 with the pinned Hermes v2026.9.14 A2A contract, which has
+        no outbound token_env/token_file resolver — plugins/platforms/a2a/
+        tools.py::_auth_header only reads auth.token after config.yaml's own
+        ${VAR} expansion): generated config.yaml MUST contain no unresolved
+        ${...} placeholders EXCEPT exactly the two credential references
+        ${ALCF_ACCESS_TOKEN} and ${A2A_OUTBOUND_WESLEY_TOKEN}. Those two are
+        the only supported way to keep token literals out of config.yaml
+        while still authenticating through the existing Hermes A2A client;
+        every other templated field must resolve to a literal value. This is
+        an exact allowlist, not `<= 2` or `any two` — an extra or different
+        placeholder anywhere in the file fails this test."""
         import re
         self._render_ok(tmp_path)
         raw = (tmp_path / "home" / "config.yaml").read_text()
@@ -509,6 +589,7 @@ class TestRealHermesConfigLoader:
             "    'a2a_enabled': cfg.get('gateway', {}).get('platforms', {}).get('a2a', {}).get('enabled'),\n"
             "    'has_custom_provider': bool(cfg.get('custom_providers')),\n"
             "    'api_key': cfg.get('model', {}).get('api_key'),\n"
+            "    'wesley_token': cfg.get('a2a_agents', {}).get('wesley', {}).get('auth', {}).get('token'),\n"
             "}))\n"
         )
         proc = subprocess.run(
@@ -524,6 +605,14 @@ class TestRealHermesConfigLoader:
         # it must no longer be the unresolved ${ALCF_ACCESS_TOKEN} string.
         assert payload["api_key"] != "${ALCF_ACCESS_TOKEN}"
         assert payload["api_key"] == "fake-inference-access-token"
+        # Same requirement for the outbound Wesley A2A bearer token: the
+        # ${A2A_OUTBOUND_WESLEY_TOKEN} raw-config reference (the second and
+        # only other allowed unresolved placeholder) must resolve through
+        # real load_config() + .env expansion before plugins/platforms/a2a/
+        # tools.py::_auth_header ever sees it, since that function reads
+        # only the already-expanded auth.token literal.
+        assert payload["wesley_token"] != "${A2A_OUTBOUND_WESLEY_TOKEN}"
+        assert payload["wesley_token"]
 
 
 if __name__ == "__main__":

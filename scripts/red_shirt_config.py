@@ -32,6 +32,14 @@ Fail-closed rules
   file + os.replace). .env is written mode 0600. config.yaml never contains a
   literal token value — token fields are left as ``${VAR}`` references that
   Hermes's own config loader resolves from the environment .env populates.
+  Manager decision reconciling the "no unresolved ${...} placeholders"
+  acceptance criterion with the pinned Hermes v2026.9.14 A2A contract (no
+  outbound token_env/token_file resolver exists in
+  plugins/platforms/a2a/tools.py — ``_auth_header`` reads only the already
+  env-expanded ``auth.token``): the ONLY two ``${...}`` references allowed to
+  remain unresolved in generated config.yaml are ``${ALCF_ACCESS_TOKEN}`` and
+  ``${A2A_OUTBOUND_WESLEY_TOKEN}``. Every other templated field must resolve
+  to a literal value.
 
 Catalog/jobs fixtures
 ----------------------
@@ -377,9 +385,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     vs = sub.add_parser("validate-secrets",
                         help="validate credential files without disclosing values")
-    vs.add_argument("--headscale-key", default=None)
-    vs.add_argument("--inbound-a2a", default=None)
-    vs.add_argument("--outbound-a2a", default=None)
+    vs.add_argument("--headscale-key", required=True)
+    vs.add_argument("--inbound-a2a", required=True)
+    vs.add_argument("--outbound-a2a", required=True)
 
     rn = sub.add_parser("render", help="render Hermes config + secret .env")
     rn.add_argument("--home", required=True, help="$HERMES_HOME target directory")
