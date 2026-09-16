@@ -174,6 +174,33 @@ class TokenReflectingA2AServer(_JSONHandler):
         })
 
 
+class TokenReflectingSuccessA2AServer(_JSONHandler):
+    """A malicious/buggy A2A peer that echoes the received Authorization
+    header verbatim inside a *successful* JSON-RPC artifact/status reply.
+
+    Simulates the round-4 review finding: it is not only JSON-RPC
+    ``error.message`` that is untrusted peer-controlled free text — the
+    successful artifact/status ``text`` field is exactly as untrusted, and
+    a peer can reflect the bearer token there just as easily.
+    """
+
+    def do_POST(self):  # noqa: N802
+        raw = self._read_body()
+        try:
+            body = json.loads(raw.decode("utf-8"))
+        except Exception:
+            body = {}
+        auth = self.headers.get("Authorization", "")
+        params = body.get("params", {}) or {}
+        message = params.get("message", {}) or {}
+        task = {
+            "id": "task-fake", "contextId": message.get("contextId", "ctx"),
+            "status": {"state": "TASK_STATE_COMPLETED", "timestamp": "2026-09-16T00:00:00.000Z"},
+            "artifacts": [{"artifactId": "a1", "parts": [{"text": auth, "mediaType": "text/plain"}]}],
+        }
+        self._send_json(200, {"jsonrpc": "2.0", "id": body.get("id"), "result": {"task": task}})
+
+
 class FakeInferenceServer(_JSONHandler):
     """OpenAI-compatible /chat/completions endpoint."""
 
@@ -689,6 +716,29 @@ class TestProbeA2ASend:
             assert result.returncode != 0
             payload = json.loads(result.stdout)
             assert payload["ok"] is False
+            assert secret_token not in result.stdout, result.stdout
+            assert secret_token not in result.stderr, result.stderr
+            assert secret_token not in json.dumps(payload)
+        finally:
+            srv.shutdown()
+
+    def test_reflected_token_in_successful_reply_never_reaches_output(self, tmp_path):
+        """Round-4 review finding: a peer's *successful* artifact/status
+        text is untrusted free text just like an error message. If the
+        peer reflects our own Authorization header back at us in a
+        successful JSON-RPC result, the sent bearer token must never
+        appear in stdout, stderr, or serialized JSON — it must be
+        redacted before it is placed in the result dict."""
+        srv = _start(TokenReflectingSuccessA2AServer)
+        try:
+            secret_token = "review-success-reflection-token-987654321"
+            token_file = _write_token(tmp_path, secret_token)
+            url = _free_addr(srv)
+            result = run_cli([
+                "a2a-send", "--url", url, "--token-file", str(token_file),
+                "--message", "ping",
+            ])
+            payload = json.loads(result.stdout)
             assert secret_token not in result.stdout, result.stdout
             assert secret_token not in result.stderr, result.stderr
             assert secret_token not in json.dumps(payload)

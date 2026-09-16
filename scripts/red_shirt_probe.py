@@ -347,6 +347,7 @@ def probe_a2a_send(url: str, token_file: str, message: str,
 
     result = parsed.get("result")
     reply = _extract_reply_text(result)
+    reply = _redact_secret(reply, token)
     if not reply:
         return {"step": "a2a_send", "ok": False, "detail": "reply artifact/status text was empty"}
     return {"step": "a2a_send", "ok": True, "reply": reply, "context_id": context_id}
