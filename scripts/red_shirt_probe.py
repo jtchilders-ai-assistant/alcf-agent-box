@@ -84,35 +84,76 @@ def _read_token(token_file: str) -> str:
     return token
 
 
-def _opener(proxy_url: Optional[str]) -> urllib.request.OpenerDirector:
+class _PinnedAuthorityRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """A redirect handler that refuses to follow any redirect whose target
+    authority does not exactly match ``allowed_authority``.
+
+    Without this, urllib's default HTTPRedirectHandler follows a 3xx
+    response's Location header unconditionally — so a compromised or
+    misbehaving Tailscale-side peer could return a redirect to an
+    arbitrary, non-Wesley authority and the ProxyHandler would happily
+    forward the SECOND request there too, defeating the exact-authority
+    allowlist enforced by ``_check_wesley_authority`` (which only ever
+    inspects the first, caller-supplied URL). This handler is the
+    redirect-hop equivalent of that check: raise before a second request
+    is ever issued.
+    """
+
+    def __init__(self, allowed_authority: str) -> None:
+        self._allowed_authority = allowed_authority
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        from urllib.parse import urlsplit
+        target_authority = urlsplit(newurl).netloc
+        if target_authority != self._allowed_authority:
+            raise AuthorityMismatchError(
+                f"redirect to authority {target_authority!r} does not match "
+                f"the exact allowlisted authority {self._allowed_authority!r}: "
+                "refusing to follow a redirect off the pinned Wesley authority"
+            )
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _opener(proxy_url: Optional[str], pinned_authority: Optional[str] = None) -> urllib.request.OpenerDirector:
     """Build a per-call urllib opener. With a proxy, ONLY this opener's calls
     go through it — no process-wide os.environ mutation, so inference (or any
-    other call built with a fresh opener/urlopen) is never captured."""
+    other call built with a fresh opener/urlopen) is never captured.
+
+    ``pinned_authority``, when supplied, additionally installs a redirect
+    handler that refuses to follow any 3xx response to a different
+    authority — closing the gap where the initial-URL authority check
+    passes but a redirect hop silently smuggles the request to an
+    arbitrary authority through the same proxy.
+    """
+    handlers: list = []
     if proxy_url:
-        handler = urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
-        return urllib.request.build_opener(handler)
-    # ProxyHandler({}) disables ambient environment proxy pickup entirely,
-    # so a caller that does not pass --proxy is immune to an inherited
-    # HTTP_PROXY/http_proxy env var silently redirecting the call.
-    return urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        handlers.append(urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url}))
+    else:
+        # ProxyHandler({}) disables ambient environment proxy pickup entirely,
+        # so a caller that does not pass --proxy is immune to an inherited
+        # HTTP_PROXY/http_proxy env var silently redirecting the call.
+        handlers.append(urllib.request.ProxyHandler({}))
+    if pinned_authority:
+        handlers.append(_PinnedAuthorityRedirectHandler(pinned_authority))
+    return urllib.request.build_opener(*handlers)
 
 
 def _http_get_json(url: str, *, proxy: Optional[str], headers: Optional[dict] = None,
-                   timeout: int = DEFAULT_TIMEOUT) -> dict:
+                   timeout: int = DEFAULT_TIMEOUT, pinned_authority: Optional[str] = None) -> dict:
     req = urllib.request.Request(url, headers=headers or {}, method="GET")
-    opener = _opener(proxy)
+    opener = _opener(proxy, pinned_authority)
     with opener.open(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
 def _http_post_json(url: str, body: dict, *, proxy: Optional[str], headers: Optional[dict] = None,
-                    timeout: int = DEFAULT_TIMEOUT) -> tuple[int, Any]:
+                    timeout: int = DEFAULT_TIMEOUT, pinned_authority: Optional[str] = None) -> tuple[int, Any]:
     """POST JSON; returns (status_code, parsed_body_or_None). Raises only on
     transport-level failures (DNS, connection refused, timeout)."""
     data = json.dumps(body).encode("utf-8")
     hdrs = {"Content-Type": "application/json", **(headers or {})}
     req = urllib.request.Request(url, data=data, headers=hdrs, method="POST")
-    opener = _opener(proxy)
+    opener = _opener(proxy, pinned_authority)
     try:
         with opener.open(req, timeout=timeout) as resp:
             raw = resp.read()
@@ -219,7 +260,10 @@ def _extract_reply_text(result: Any) -> str:
 def probe_card(url: str, proxy: Optional[str], proxy_authority: Optional[str] = None) -> dict:
     try:
         _check_wesley_authority(url, proxy, proxy_authority)
-        card = _http_get_json(_card_url(url), proxy=proxy)
+        # proxy_authority (once validated above) is also the redirect pin:
+        # a 3xx off that exact authority must never be followed, closing the
+        # gap where only the initial URL's authority was checked.
+        card = _http_get_json(_card_url(url), proxy=proxy, pinned_authority=proxy_authority)
     except Exception as e:  # noqa: BLE001 — fail closed, message is non-secret
         return {"step": "card", "ok": False, "detail": f"{type(e).__name__}: {e}"}
     name = card.get("name") if isinstance(card, dict) else None
@@ -263,7 +307,10 @@ def probe_a2a_send(url: str, token_file: str, message: str,
     }
     headers = {"Authorization": f"Bearer {token}"}
     try:
-        status, parsed = _http_post_json(url, body, proxy=proxy, headers=headers)
+        # proxy_authority (validated above) also pins any redirect hop —
+        # see probe_card for why this must not be limited to the initial URL.
+        status, parsed = _http_post_json(url, body, proxy=proxy, headers=headers,
+                                         pinned_authority=proxy_authority)
     except Exception as e:  # noqa: BLE001
         return {"step": "a2a_send", "ok": False, "detail": f"{type(e).__name__}: {e}"}
 

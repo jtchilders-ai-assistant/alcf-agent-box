@@ -266,6 +266,38 @@ class AlcfForwardHTTPProxy(_ForwardingProxyBase):
     received_authorities: list[str] = []
 
 
+class RedirectingHTTPProxy(http.server.BaseHTTPRequestHandler):
+    """A real HTTP forward proxy that, instead of forwarding, answers every
+    absolute-form request with an HTTP 302 pointing at ``redirect_target``
+    (a caller-controlled, typically off-authority, URL).
+
+    Simulates a compromised/misbehaving Tailscale-side peer trying to smuggle
+    a follow-up request to an arbitrary authority via a redirect — the exact
+    scenario the round-2 review finding demonstrated urllib's default
+    redirect handling did not block.
+    """
+
+    redirect_target: str = ""
+    received_authorities: list[str] = []
+
+    def log_message(self, *a):
+        pass
+
+    def _redirect(self) -> None:
+        parsed = urllib.parse.urlsplit(self.path)
+        type(self).received_authorities.append(parsed.netloc)
+        self.send_response(302)
+        self.send_header("Location", self.redirect_target)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def do_GET(self):  # noqa: N802
+        self._redirect()
+
+    def do_POST(self):  # noqa: N802
+        self._redirect()
+
+
 def _start(handler_cls) -> http.server.HTTPServer:
     srv = http.server.HTTPServer(("127.0.0.1", 0), handler_cls)
     t = threading.Thread(target=srv.serve_forever, daemon=True)
@@ -317,6 +349,17 @@ def alcf_forward_proxy():
     simultaneous, non-overlapping routing."""
     AlcfForwardHTTPProxy.received_authorities = []
     srv = _start(AlcfForwardHTTPProxy)
+    yield srv
+    srv.shutdown()
+
+
+@pytest.fixture
+def redirecting_proxy():
+    """A fake forward proxy that answers every request with a 302 to an
+    attacker-controlled Location — used to prove redirect hops cannot
+    smuggle a request to an off-authority target."""
+    RedirectingHTTPProxy.received_authorities = []
+    srv = _start(RedirectingHTTPProxy)
     yield srv
     srv.shutdown()
 
@@ -403,6 +446,32 @@ class TestProbeCard:
         assert payload["ok"] is False
         assert ForwardingHTTPProxy.received_authorities == [], \
             "no request should reach the proxy for a non-allowlisted authority"
+
+    def test_card_probe_rejects_off_authority_redirect(self, redirecting_proxy):
+        """Round-2 review finding: the initial-URL authority check alone is
+        not enough — a peer reachable via the allowlisted authority can
+        respond with a 3xx redirecting to an arbitrary authority, and
+        urllib's default redirect handling would follow it unconditionally,
+        smuggling the SECOND request through the same Tailscale proxy to an
+        authority never allowlisted. Reproduces the reviewer's exact
+        exploit shape (a proxy answering the allowlisted request with a
+        redirect to an off-authority target) and requires it to fail closed
+        with the second request never issued.
+        """
+        fake_wesley_url = "http://red-shirt-fake-wesley.invalid:9900"
+        RedirectingHTTPProxy.redirect_target = "http://arbitrary.invalid:1234/redirected"
+        proxy_url = _free_addr(redirecting_proxy)
+
+        result = run_cli(["card", "--url", fake_wesley_url, "--proxy", proxy_url,
+                          "--proxy-authority", "red-shirt-fake-wesley.invalid:9900"])
+        assert result.returncode != 0, result.stdout
+        payload = json.loads(result.stdout)
+        assert payload["ok"] is False
+        # Exactly the one (allowlisted) request may reach the proxy; the
+        # redirect must never be followed into a second request.
+        assert RedirectingHTTPProxy.received_authorities == \
+            ["red-shirt-fake-wesley.invalid:9900"], \
+            RedirectingHTTPProxy.received_authorities
 
     def test_card_probe_without_proxy_direct(self, card_server):
         url = _free_addr(card_server)
@@ -547,6 +616,28 @@ class TestProbeA2ASend:
         payload = json.loads(result.stdout)
         assert payload["ok"] is False
         assert ForwardingHTTPProxy.received_authorities == []
+
+    def test_send_rejects_off_authority_redirect(self, redirecting_proxy, tmp_path):
+        """Same round-2 finding as the card probe, applied to the
+        authenticated A2A POST path: a redirect off the allowlisted
+        authority must be rejected before a second request is issued,
+        even though the bearer token is present."""
+        token_file = _write_token(tmp_path, "wesley-inbound-token-1234567890")
+        fake_wesley_url = "http://red-shirt-fake-wesley.invalid:9900"
+        RedirectingHTTPProxy.redirect_target = "http://arbitrary.invalid:1234/redirected"
+        proxy_url = _free_addr(redirecting_proxy)
+
+        result = run_cli([
+            "a2a-send", "--url", fake_wesley_url, "--token-file", str(token_file),
+            "--message", "ping", "--proxy", proxy_url,
+            "--proxy-authority", "red-shirt-fake-wesley.invalid:9900",
+        ])
+        assert result.returncode != 0, result.stdout
+        payload = json.loads(result.stdout)
+        assert payload["ok"] is False
+        assert RedirectingHTTPProxy.received_authorities == \
+            ["red-shirt-fake-wesley.invalid:9900"], \
+            RedirectingHTTPProxy.received_authorities
 
     def test_token_never_appears_in_argv(self, a2a_server, tmp_path):
         """The bearer token must be read from a file, never passed as a CLI arg."""
