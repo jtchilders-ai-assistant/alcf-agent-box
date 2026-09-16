@@ -1,0 +1,88 @@
+# Red Shirt Polaris — Hermes config template
+#
+# Rendered by scripts/red_shirt_config.py `render` at job startup. Every
+# field the renderer owns (model, custom_providers, gateway.platforms.a2a,
+# a2a, a2a_agents) is overwritten in the rendered copy; anything else here
+# survives untouched. Kept intentionally minimal: the packaged agent has
+# exactly ONE inference backend (ALCF) and ONE A2A peer (wesley), so it can
+# never silently talk to the wrong host or accept the wrong caller.
+#
+# Design: docs/superpowers/specs/2026-09-16-red-shirt-polaris-design.md
+# Plan:   docs/superpowers/plans/2026-09-16-red-shirt-polaris.md (Task 3)
+
+model:
+  # provider/base_url/api_key/model/default/strip_tool_message_name/
+  # context_length are all set by the renderer from the live ALCF catalog and
+  # the selected LIVE model. api_key is left as the ${ALCF_ACCESS_TOKEN} env
+  # reference — Hermes's own config loader expands it from $HERMES_HOME/.env,
+  # so the literal token value never appears in this file.
+  provider: "${ALCF_LAUNCH_PROVIDER}"
+  base_url: "${ALCF_BASE_URL}"
+  api_key: "${ALCF_ACCESS_TOKEN}"
+  model: "${ALCF_MODEL}"
+  default: "${ALCF_MODEL}"
+  strip_tool_message_name: true
+  context_length: ${ALCF_CONTEXT_LENGTH}
+
+agent:
+  # Trim toolsets that make no sense for a headless compute-resident agent.
+  disabled_toolsets:
+    - computer_use
+    - image_gen
+    - video_gen
+    - tts
+    - spotify
+    - x_search
+    - yuanbao
+
+memory:
+  # Built-in on-disk memory (MEMORY.md/USER.md), persisted via the mounted
+  # persistent $HERMES_HOME. No external provider needed.
+  provider: none
+
+display:
+  # No dashboard/TUI in the compute job — the only surface is A2A.
+  interface: cli
+
+# Standard A2A: inbound listener on loopback 9900, restricted to the
+# authenticated peer "wesley"; the renderer sets enabled/port on every
+# render. Tailscale Serve (outside Hermes) forwards the tailnet-facing port
+# to this loopback listener; Hermes itself never binds non-loopback.
+gateway:
+  platforms:
+    a2a:
+      enabled: true
+      extra:
+        port: 9900
+
+a2a:
+  trusted_peers:
+    - wesley
+
+# Outbound peer: Red Shirt Polaris -> Wesley. The renderer fills url/auth;
+# the bearer token is left as an env reference resolved from
+# $HERMES_HOME/.env (A2A_OUTBOUND_WESLEY_TOKEN), never embedded literally.
+a2a_agents:
+  wesley:
+    url: "${A2A_WESLEY_URL}"
+    auth:
+      type: bearer
+      token: "${A2A_OUTBOUND_WESLEY_TOKEN}"
+    timeout: 120
+
+# Curated switchable model — GENERATED AT RENDER TIME by
+# scripts/red_shirt_config.py, which reuses scripts/populate_models.py's
+# per-cluster chat-model selection (only models with a REAL serving context
+# >= 64000 tokens are eligible) and queries the ALCF `.../<cluster>/jobs`
+# endpoint to pick a model that is currently LIVE. The static block below is
+# a committed fallback that keeps this template valid YAML if the renderer
+# is ever skipped entirely; it is never used when render succeeds.
+custom_providers:
+  - name: alcf-sophia
+    base_url: "https://inference-api.alcf.anl.gov/resource_server/sophia/vllm/v1"
+    api_key: "${ALCF_ACCESS_TOKEN}"
+    discover_models: false
+    max_tokens: 2048
+    models:
+      argonne/AuroraGPT-IT-v4-0125:
+        context_length: 128000
