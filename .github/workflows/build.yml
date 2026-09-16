@@ -22,6 +22,7 @@ permissions:
 env:
   IMAGE: ghcr.io/${{ github.repository_owner }}/alcf-agent
   PROBE_IMAGE: ghcr.io/${{ github.repository_owner }}/alcf-agent-headscale-probe
+  RED_SHIRT_POLARIS_IMAGE: ghcr.io/${{ github.repository_owner }}/alcf-red-shirt-polaris
 
 jobs:
   build:
@@ -121,4 +122,53 @@ jobs:
           provenance: false
           tags: ${{ steps.probe-meta.outputs.tags }}
           labels: ${{ steps.probe-meta.outputs.labels }}
+
+  # ---------------------------------------------------------------------------
+  # Red Shirt Polaris compute image
+  # Dedicated minimal image for the resident Polaris compute agent: pinned
+  # Hermes base + pinned Tailscale, no dashboard entrypoint. Published as
+  # ghcr.io/<owner>/alcf-red-shirt-polaris, SHA-scoped like the other targets.
+  # ---------------------------------------------------------------------------
+  build-red-shirt-polaris:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute red-shirt-polaris tags
+        id: red-shirt-meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.RED_SHIRT_POLARIS_IMAGE }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=tag
+            type=sha,format=short
+
+      - name: Set up QEMU (for cross-arch emulation)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push Red Shirt Polaris image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.red-shirt-polaris
+          platforms: linux/amd64,linux/arm64
+          push: true
+          cache-from: type=gha,scope=red-shirt-polaris-${{ github.sha }}
+          cache-to: type=gha,scope=red-shirt-polaris-${{ github.sha }},mode=max
+          provenance: false
+          tags: ${{ steps.red-shirt-meta.outputs.tags }}
+          labels: ${{ steps.red-shirt-meta.outputs.labels }}
+          build-args: |
+            ALCF_GIT_SHA=${{ github.sha }}
 
