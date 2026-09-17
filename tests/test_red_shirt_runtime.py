@@ -1655,8 +1655,18 @@ class TestProductionPathOrdering:
         original_inference_post = FakeInferenceServer.do_POST
 
         def instrumented_inference_post(handler):
+            original_send_json = handler._send_json
+
+            def send_json(code, payload):
+                choices = payload.get("choices", [])
+                content = (choices[0].get("message", {}).get("content")
+                           if choices else None)
+                if code == 200 and content:
+                    append_event("inference_smoke")
+                original_send_json(code, payload)
+
+            handler._send_json = send_json
             original_inference_post(handler)
-            append_event("inference_smoke")
 
         monkeypatch.setattr(FakeInferenceServer, "do_POST", instrumented_inference_post)
         env, inference_srv = _fake_runtime_env(tmp_path)
@@ -1749,8 +1759,6 @@ class TestProductionPathOrdering:
         )
         hermes.chmod(0o755)
 
-        seen_card_events = set()
-
         class OrderedCardHandler(FakeCardServer):
             def do_GET(self):  # noqa: N802
                 # The entrypoint launches Hermes before probing its card, but
@@ -1761,10 +1769,15 @@ class TestProductionPathOrdering:
                     return
                 event = ("tailnet_card" if self.headers.get("X-Red-Shirt-Tailnet-Probe") == "1"
                          else "local_card")
+                original_send_json = self._send_json
+
+                def send_json(code, payload):
+                    if code == 200:
+                        append_event(event)
+                    original_send_json(code, payload)
+
+                self._send_json = send_json
                 super().do_GET()
-                if event not in seen_card_events:
-                    append_event(event)
-                    seen_card_events.add(event)
 
         a2a_port = _free_port()
         card_srv = http.server.HTTPServer(("127.0.0.1", a2a_port), OrderedCardHandler)
@@ -1805,12 +1818,24 @@ class TestProductionPathOrdering:
                 f"returncode={proc.poll()!r}"
             )
         finally:
-            if proc.poll() is None:
-                proc.send_signal(signal.SIGTERM)
-            out, err = proc.communicate(timeout=20)
-            card_srv.shutdown()
-            inference_srv.shutdown()
-            Path(env["RED_SHIRT_TS_SOCKET"]).unlink(missing_ok=True)
+            try:
+                if proc.poll() is None:
+                    proc.send_signal(signal.SIGTERM)
+                try:
+                    out, err = proc.communicate(timeout=20)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    out, err = proc.communicate(timeout=5)
+            finally:
+                try:
+                    card_srv.shutdown()
+                    card_srv.server_close()
+                finally:
+                    try:
+                        inference_srv.shutdown()
+                        inference_srv.server_close()
+                    finally:
+                        Path(env["RED_SHIRT_TS_SOCKET"]).unlink(missing_ok=True)
         assert proc.returncode == 143, f"stdout={out!r}, stderr={err!r}"
 
     def test_production_path_does_not_require_hermes_cmd(self, tmp_path, monkeypatch):
