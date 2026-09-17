@@ -1644,6 +1644,175 @@ class TestProductionPathOrdering:
     being consulted -- production never depends on that test-mode variable.
     """
 
+    def test_exact_production_startup_order(self, tmp_path, monkeypatch):
+        events = tmp_path / "startup-events.log"
+        events.write_text("")
+
+        def append_event(name: str) -> None:
+            with events.open("a", encoding="utf-8") as stream:
+                stream.write(name + "\n")
+
+        original_inference_post = FakeInferenceServer.do_POST
+
+        def instrumented_inference_post(handler):
+            original_inference_post(handler)
+            append_event("inference_smoke")
+
+        monkeypatch.setattr(FakeInferenceServer, "do_POST", instrumented_inference_post)
+        env, inference_srv = _fake_runtime_env(tmp_path)
+        assert Path(env["RED_SHIRT_JOB_ROOT"]) not in events.parents
+
+        real_config = SCRIPTS / "red_shirt_config.py"
+        config_wrapper = tmp_path / "config-wrapper.py"
+        config_wrapper.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os, subprocess, sys\n"
+            "rc = subprocess.run([sys.executable, os.environ['REAL_CONFIG'], *sys.argv[1:]]).returncode\n"
+            "if rc == 0 and len(sys.argv) > 1:\n"
+            "    event = {'validate-secrets': 'credentials_validated', 'render': 'config_rendered'}.get(sys.argv[1])\n"
+            "    if event:\n"
+            "        with open(os.environ['STARTUP_EVENTS'], 'a', encoding='utf-8') as f: f.write(event + '\\n')\n"
+            "sys.exit(rc)\n"
+        )
+        config_wrapper.chmod(0o755)
+
+        connect_proxy = tmp_path / "connect-proxy.py"
+        connect_proxy.write_text(
+            "#!/usr/bin/env python3\n"
+            "import argparse, os, socket\n"
+            "p = argparse.ArgumentParser(); p.add_argument('--listen-port', type=int); p.add_argument('--upstream'); a = p.parse_args()\n"
+            "s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(('127.0.0.1', a.listen_port)); s.listen()\n"
+            "logged = False\n"
+            "while True:\n"
+            "    conn, _ = s.accept()\n"
+            "    if not logged:\n"
+            "        with open(os.environ['STARTUP_EVENTS'], 'a', encoding='utf-8') as f: f.write('connect_proxy_reachable\\n')\n"
+            "        logged = True\n"
+            "    conn.close()\n"
+        )
+        connect_proxy.chmod(0o755)
+
+        tailscaled = tmp_path / "bin" / "tailscaled"
+        tailscaled.write_text(
+            "#!/usr/bin/env python3\n"
+            "import http.server, os, signal, socket, sys, threading, urllib.error, urllib.parse, urllib.request\n"
+            "sock_path = next(x.split('=', 1)[1] for x in sys.argv if x.startswith('--socket='))\n"
+            "proxy_port = int(next(x.rsplit(':', 1)[1] for x in sys.argv if x.startswith('--outbound-http-proxy-listen=')))\n"
+            "target_port = int(os.environ['RED_SHIRT_A2A_PORT'])\n"
+            "sock = socket.socket(socket.AF_UNIX); sock.bind(sock_path); sock.listen(1)\n"
+            "with open(os.environ['STARTUP_EVENTS'], 'a', encoding='utf-8') as f: f.write('tailscaled_started\\n')\n"
+            "opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))\n"
+            "class Handler(http.server.BaseHTTPRequestHandler):\n"
+            "    def log_message(self, *args): pass\n"
+            "    def do_GET(self):\n"
+            "        parsed = urllib.parse.urlsplit(self.path)\n"
+            "        target = 'http://127.0.0.1:%d%s' % (target_port, parsed.path)\n"
+            "        if parsed.query: target += '?' + parsed.query\n"
+            "        req = urllib.request.Request(target, headers={'X-Red-Shirt-Tailnet-Probe': '1'})\n"
+            "        try:\n"
+            "            with opener.open(req, timeout=10) as resp:\n"
+            "                data = resp.read(); self.send_response(resp.status)\n"
+            "                for key, value in resp.getheaders():\n"
+            "                    if key.lower() != 'transfer-encoding': self.send_header(key, value)\n"
+            "                self.end_headers(); self.wfile.write(data)\n"
+            "        except urllib.error.HTTPError as exc:\n"
+            "            data = exc.read(); self.send_response(exc.code); self.end_headers(); self.wfile.write(data)\n"
+            "server = http.server.HTTPServer(('127.0.0.1', proxy_port), Handler)\n"
+            "signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))\n"
+            "try: server.serve_forever()\n"
+            "finally: server.server_close(); sock.close(); os.unlink(sock_path) if os.path.exists(sock_path) else None\n"
+        )
+        tailscaled.chmod(0o755)
+
+        tailscale = tmp_path / "bin" / "tailscale"
+        tailscale.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, os, sys\n"
+            "args = ' '.join(sys.argv[1:])\n"
+            "def log(name):\n"
+            "    with open(os.environ['STARTUP_EVENTS'], 'a', encoding='utf-8') as f: f.write(name + '\\n')\n"
+            "if ' up ' in ' ' + args + ' ': sys.exit(0)\n"
+            "if ' status --json' in args: print(json.dumps({'BackendState': 'Running'})); log('tailscale_up')\n"
+            "elif ' ip -4' in args: print('100.64.0.9')\n"
+            "elif ' serve --bg --tcp=' in args: log('tailscale_serve')\n"
+            "sys.exit(0)\n"
+        )
+        tailscale.chmod(0o755)
+
+        hermes = tmp_path / "bin" / "hermes"
+        hermes.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os, signal, sys, time\n"
+            "with open(os.environ['STARTUP_EVENTS'], 'a', encoding='utf-8') as f: f.write('hermes_started\\n')\n"
+            "signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))\n"
+            "while True: time.sleep(1)\n"
+        )
+        hermes.chmod(0o755)
+
+        seen_card_events = set()
+
+        class OrderedCardHandler(FakeCardServer):
+            def do_GET(self):  # noqa: N802
+                # The entrypoint launches Hermes before probing its card, but
+                # the child may not be scheduled before the first probe. Model
+                # a real gateway: it cannot serve a card until Hermes started.
+                if "hermes_started" not in events.read_text().splitlines():
+                    self._send_json(503, {"error": "gateway starting"})
+                    return
+                event = ("tailnet_card" if self.headers.get("X-Red-Shirt-Tailnet-Probe") == "1"
+                         else "local_card")
+                super().do_GET()
+                if event not in seen_card_events:
+                    append_event(event)
+                    seen_card_events.add(event)
+
+        a2a_port = _free_port()
+        card_srv = http.server.HTTPServer(("127.0.0.1", a2a_port), OrderedCardHandler)
+        threading.Thread(target=card_srv.serve_forever, daemon=True).start()
+        env.update({
+            "RED_SHIRT_A2A_PORT": str(a2a_port),
+            "RED_SHIRT_CONFIG_PY": str(config_wrapper),
+            "RED_SHIRT_CONNECT_PROXY_PY": str(connect_proxy),
+            "RED_SHIRT_TAILSCALED_BIN": str(tailscaled),
+            "RED_SHIRT_TAILSCALE_BIN": str(tailscale),
+            "RED_SHIRT_HERMES_BIN": str(hermes),
+            "REAL_CONFIG": str(real_config),
+            "STARTUP_EVENTS": str(events),
+        })
+        full_env = os.environ.copy()
+        full_env.update(env)
+        proc = subprocess.Popen(["bash", str(ENTRYPOINT)], env=full_env,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        out = err = None
+        try:
+            ready_path = Path(env["RED_SHIRT_READY_OUTPUT"])
+            deadline = time.time() + 40
+            while time.time() < deadline and proc.poll() is None:
+                if ready_path.exists():
+                    record = json.loads(ready_path.read_text())
+                    if record.get("ok") is True:
+                        append_event("ready_observed")
+                        break
+                time.sleep(0.1)
+            observed = events.read_text().splitlines()
+            expected = [
+                "credentials_validated", "connect_proxy_reachable", "tailscaled_started",
+                "tailscale_up", "tailscale_serve", "config_rendered", "inference_smoke",
+                "hermes_started", "local_card", "tailnet_card", "ready_observed",
+            ]
+            assert observed == expected, (
+                f"startup order mismatch: observed={observed!r}, expected={expected!r}, "
+                f"returncode={proc.poll()!r}"
+            )
+        finally:
+            if proc.poll() is None:
+                proc.send_signal(signal.SIGTERM)
+            out, err = proc.communicate(timeout=20)
+            card_srv.shutdown()
+            inference_srv.shutdown()
+            Path(env["RED_SHIRT_TS_SOCKET"]).unlink(missing_ok=True)
+        assert proc.returncode == 143, f"stdout={out!r}, stderr={err!r}"
+
     def test_production_path_does_not_require_hermes_cmd(self, tmp_path, monkeypatch):
         """Round-1 requirement: production works without RED_SHIRT_HERMES_CMD
         (the bug the card was opened to fix)."""
