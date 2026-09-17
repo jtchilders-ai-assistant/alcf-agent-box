@@ -53,6 +53,12 @@ def test_compute_image_contains_runtime_token_helper():
     ) in body
 
 
+def test_entrypoint_uses_combined_helper_cli_for_inference_smoke_token():
+    body = text(ROOT / 'scripts' / 'red_shirt_entrypoint.sh')
+    token_step = body[body.index('INFER_TOKEN_FILE='):body.index('chmod 600 "$INFER_TOKEN_FILE"')]
+    assert 'get_access_token --service inference' in token_step
+
+
 def test_entrypoint_routes_inference_smoke_through_alcf_proxy():
     body = text(ROOT / 'scripts' / 'red_shirt_entrypoint.sh')
     smoke = body[body.index('"$PROBE_PY" inference'):body.index('log "inference smoke OK"')]

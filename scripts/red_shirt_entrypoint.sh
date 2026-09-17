@@ -572,7 +572,7 @@ fi
 log "rendered config; selected model=$SELECTED_MODEL"
 
 INFER_TOKEN_FILE="$JOB_ROOT/inference.token"
-if ! "$PYTHON_BIN" "$TOKEN_HELPER" get_access_token > "$INFER_TOKEN_FILE" 2>"$JOB_ROOT/token.err"; then
+if ! "$PYTHON_BIN" "$TOKEN_HELPER" get_access_token --service inference > "$INFER_TOKEN_FILE" 2>"$JOB_ROOT/token.err"; then
   rm -f "$INFER_TOKEN_FILE"
   fail "could not obtain an inference access token for the smoke test"
 fi
