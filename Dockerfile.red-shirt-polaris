@@ -32,6 +32,7 @@ COPY --from=tailscale-src /usr/local/bin/tailscaled /usr/local/bin/tailscaled
 # this Dockerfile's own tests are static-content tests that do not build the
 # image, so they do not require these paths to be present yet.
 COPY scripts/connect_proxy.py /opt/red-shirt-polaris/connect_proxy.py
+COPY scripts/alcf_combined_auth.py /opt/red-shirt-polaris/alcf_combined_auth.py
 COPY scripts/red_shirt_config.py /opt/red-shirt-polaris/red_shirt_config.py
 COPY scripts/red_shirt_probe.py /opt/red-shirt-polaris/red_shirt_probe.py
 COPY scripts/red_shirt_entrypoint.sh /opt/red-shirt-polaris/entrypoint.sh

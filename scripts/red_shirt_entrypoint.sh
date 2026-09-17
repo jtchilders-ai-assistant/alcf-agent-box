@@ -273,6 +273,7 @@ HEADSCALE_URL="${RED_SHIRT_HEADSCALE_URL:-}"
 TS_HOSTNAME="${RED_SHIRT_HOSTNAME:-$(hostname)}"
 
 ALCF_PROXY="${RED_SHIRT_ALCF_PROXY:-proxy.alcf.anl.gov:3128}"
+ALCF_PROXY_URL="${RED_SHIRT_ALCF_PROXY_URL:-http://$ALCF_PROXY}"
 CONNECT_PROXY_PORT="${RED_SHIRT_CONNECT_PROXY_PORT:-18443}"
 TS_OUTBOUND_HTTP_PORT="${RED_SHIRT_TS_OUTBOUND_HTTP_PORT:-1056}"
 TS_STATE_DIR="${RED_SHIRT_TS_STATE_DIR:-$JOB_ROOT/ts-state}"
@@ -517,6 +518,7 @@ TAILNET_IP="$("$TAILSCALE_BIN" --socket="$TS_SOCKET" ip -4 2>/dev/null | head -n
 if [ -z "$TAILNET_IP" ]; then
   fail "could not resolve our own tailnet IPv4 address"
 fi
+A2A_PUBLIC_URL="http://$TAILNET_IP:$A2A_PORT/"
 
 # ---------------------------------------------------------------------------
 # Gate 6: configure Tailscale Serve tailnet TCP :A2A_PORT -> 127.0.0.1:A2A_PORT.
@@ -558,6 +560,7 @@ if ! "$PYTHON_BIN" "$CONFIG_PY" render \
       "${FIXTURE_ARGS[@]}" \
       --cluster "$CLUSTER" \
       --a2a-port "$A2A_PORT" \
+      --a2a-public-url "$A2A_PUBLIC_URL" \
       --wesley-url "$WESLEY_URL" \
       >"$RENDER_OUT" 2>"$JOB_ROOT/render.err"; then
   fail "Hermes config render failed (no live/eligible model, or bad credentials); see $JOB_ROOT/render.err"
@@ -577,7 +580,8 @@ chmod 600 "$INFER_TOKEN_FILE"
 if ! "$PYTHON_BIN" "$PROBE_PY" inference \
       --base-url "$ALCF_BASE_URL" \
       --model "$SELECTED_MODEL" \
-      --token-file "$INFER_TOKEN_FILE" >"$JOB_ROOT/inference-smoke.json" 2>&1; then
+      --token-file "$INFER_TOKEN_FILE" \
+      --proxy "$ALCF_PROXY_URL" >"$JOB_ROOT/inference-smoke.json" 2>&1; then
   rm -f "$INFER_TOKEN_FILE"
   fail "direct inference smoke test failed before Hermes was started; see $JOB_ROOT/inference-smoke.json"
 fi

@@ -1614,7 +1614,7 @@ def _fake_runtime_env(tmp_path: Path, *, hermes_body: str = None,
         "RED_SHIRT_WESLEY_URL": "http://100.64.0.2:9900/",
         "RED_SHIRT_HEADSCALE_URL": "https://headscale.invalid",
         "RED_SHIRT_HOSTNAME": "test-red-shirt",
-        "RED_SHIRT_ALCF_PROXY": "127.0.0.1:1",  # unused (renderer uses fixtures)
+        "RED_SHIRT_ALCF_PROXY": f"127.0.0.1:{inference_srv.server_port}",
         "RED_SHIRT_CATALOG_FIXTURE": str(catalog_fixture),
         "RED_SHIRT_JOBS_FIXTURE": str(jobs_fixture),
         "RED_SHIRT_ALCF_BASE_URL_OVERRIDE": f"http://127.0.0.1:{inference_srv.server_port}",

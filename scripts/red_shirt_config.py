@@ -160,19 +160,24 @@ def _read_secret(path_str: str) -> str:
 # ---------------------------------------------------------------------------
 
 def get_inference_token(token_helper: str) -> str:
-    """Run the supplied token-helper executable; return the printed token.
+    """Run the supplied token helper and return its token without logging it.
 
-    Mirrors inference_auth_token.py's own CLI (``get_access_token``). Never
-    logs the returned value.
+    The historical inference_auth_token.py accepts ``get_access_token`` while
+    the combined ALCF helper requires ``--service inference``. Support both
+    exact CLIs so the compute image can use the bundled combined helper.
     """
-    out = subprocess.check_output(
+    commands = (
         [sys.executable, str(token_helper), "get_access_token"],
-        text=True, timeout=60,
+        [sys.executable, str(token_helper), "get_access_token", "--service", "inference"],
     )
-    lines = [line.strip() for line in out.splitlines() if line.strip()]
-    if not lines:
-        raise RuntimeError("token helper produced no output")
-    return lines[-1]
+    last_error = ""
+    for command in commands:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=60)
+        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        if result.returncode == 0 and lines:
+            return lines[-1]
+        last_error = f"exit {result.returncode}"
+    raise RuntimeError(f"token helper failed or produced no output ({last_error})")
 
 
 def _live_ids_from_jobs(jobs_doc: dict) -> set:
