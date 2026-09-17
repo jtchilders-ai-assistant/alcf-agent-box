@@ -73,6 +73,10 @@ if link:
 if not os.path.isdir(job_parent):
     fail("RED_SHIRT_JOB_PARENT must be an existing directory")
 
+parent_st = os.stat(job_parent)
+if parent_st.st_uid != os.getuid():
+    fail("RED_SHIRT_JOB_PARENT exists but is not owned by the current user")
+
 link = find_symlink_component(job_root)
 if link:
     fail(f"RED_SHIRT_JOB_ROOT contains a symlink component: {link}")

@@ -1336,6 +1336,45 @@ class TestEntrypointJobRootProductionGuard:
         assert not hermes_marker.exists(), "Hermes must never be launched"
         assert real_target.is_dir(), "the symlink target must never be touched"
 
+    def test_non_current_uid_parent_fails_before_hermes(self, tmp_path):
+        job_parent = tmp_path / "parent"
+        job_parent.mkdir()
+        job_root = job_parent / "job-123"
+        home = tmp_path / "home"
+        home.mkdir()
+        hermes_marker = tmp_path / "hermes-launched.marker"
+        hermes = _write_exec_script(
+            tmp_path / "fake_hermes.sh",
+            f"#!/usr/bin/env bash\ntouch {shlex.quote(str(hermes_marker))}\nexit 0\n",
+        )
+        env = {
+            "RED_SHIRT_HERMES_CMD": str(hermes),
+            "RED_SHIRT_JOB_PARENT": str(job_parent),
+            "RED_SHIRT_JOB_ROOT": str(job_root),
+            "HERMES_HOME": str(home),
+            "RED_SHIRT_TERMINAL_OUTPUT": str(tmp_path / "terminal.json"),
+        }
+        fake_stat_src = (
+            "import os as _os\n"
+            "_real_stat = _os.stat\n"
+            "def _fake_stat(path, *a, **k):\n"
+            "    st = _real_stat(path, *a, **k)\n"
+            f"    if _os.path.abspath(str(path)) == {str(job_parent)!r}:\n"
+            "        st = _os.stat_result((st.st_mode, st.st_ino, st.st_dev,\n"
+            "            st.st_nlink, st.st_uid + 1, st.st_gid, st.st_size,\n"
+            "            st.st_atime, st.st_mtime, st.st_ctime))\n"
+            "    return st\n"
+            "_os.stat = _fake_stat\n"
+        )
+        sitecustomize = tmp_path / "sitecustomize.py"
+        sitecustomize.write_text(fake_stat_src)
+        env["PYTHONPATH"] = str(tmp_path)
+        result = _run_entrypoint(env)
+        assert result.returncode != 0, \
+            "a parent not owned by the current uid must be rejected"
+        assert not hermes_marker.exists(), "Hermes must never be launched"
+        assert not job_root.exists(), "the rejected root must never be created"
+
     def test_symlinked_parent_component_fails_before_hermes(self, tmp_path):
         real_parent = tmp_path / "real-parent"
         real_parent.mkdir()
