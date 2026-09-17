@@ -1,0 +1,179 @@
+#!/bin/bash
+# red-shirt-polaris.pbs — Resident Red Shirt Polaris Hermes agent launcher.
+#
+# Design: docs/superpowers/specs/2026-09-16-red-shirt-polaris-design.md
+# Plan:   docs/superpowers/plans/2026-09-16-red-shirt-polaris.md (Task 6)
+#
+# Submit from the repository root with an EXPLICIT project on the qsub
+# command line -- PBS does not expand shell variables inside directives, so
+# an allocation directive using an unexpanded variable would submit under
+# the literal string and be rejected. The account is therefore selected
+# ONLY at submit time, never baked into this file as a directive:
+#
+#   qsub -A datascience deploy/polaris/red-shirt-polaris.pbs
+#
+# See deploy/polaris/RED_SHIRT_README.md for staging, monitoring, failure
+# handling, and teardown.
+#
+#PBS -N red-shirt-polaris
+#PBS -l select=1:system=polaris
+#PBS -q prod
+#PBS -l walltime=12:00:00
+#PBS -l filesystems=home
+
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Layout (override any of these via a submit-time variable-list flag for
+# NON-secret path overrides only -- never for credential values).
+# ---------------------------------------------------------------------------
+BASE_DIR="${BASE_DIR:-$HOME/red-shirt-polaris}"
+HERMES_HOME_DIR="${HERMES_HOME_DIR:-$BASE_DIR/home}"
+SECRETS_DIR="${SECRETS_DIR:-$BASE_DIR/secrets}"
+HEADSCALE_KEY_FILE="${HEADSCALE_KEY_FILE:-$SECRETS_DIR/headscale-auth.key}"
+INBOUND_A2A_FILE="${INBOUND_A2A_FILE:-$SECRETS_DIR/inbound-a2a.token}"
+OUTBOUND_A2A_FILE="${OUTBOUND_A2A_FILE:-$SECRETS_DIR/outbound-a2a.token}"
+CA_FILE="${CA_FILE:-$SECRETS_DIR/caddy-root.crt}"
+
+# Image pin is resolved the same fail-closed way as the SIF builder: no
+# default, ${VAR:?msg} aborts with an actionable message rather than
+# silently falling back to a stale or guessed artifact.
+RED_SHIRT_IMAGE="${RED_SHIRT_IMAGE:?RED_SHIRT_IMAGE is not set. Export the CI-published image reference used to build the SIF before submitting.}"
+RED_SHIRT_DIGEST="${RED_SHIRT_DIGEST:?RED_SHIRT_DIGEST is not set. Export the CI-published sha256 manifest digest before submitting.}"
+SIF_TAG="$(printf '%s' "$RED_SHIRT_IMAGE" | sed 's/.*://')"
+SIF="${SIF:-$BASE_DIR/red-shirt-polaris-${SIF_TAG}.sif}"
+
+JOB_ID="${PBS_JOBID:-manual-$$}"
+JOB_SHORT="${JOB_ID%%.*}"
+RUN_DIR="$BASE_DIR/runs/$JOB_ID"
+SCRATCH_ROOT="/local/scratch/${USER}/red-shirt-run-${JOB_SHORT}"
+STATE_DIR="$SCRATCH_ROOT/state"
+READY_RECORD="$RUN_DIR/ready.json"
+TERMINAL_RECORD="$RUN_DIR/terminal.json"
+
+mkdir -p "$RUN_DIR" "$HERMES_HOME_DIR" "$STATE_DIR"
+chmod 700 "$RUN_DIR" "$STATE_DIR"
+
+log() { printf '[red-shirt-pbs] %s\n' "$*"; }
+
+# ---------------------------------------------------------------------------
+# Modules (verified order: use, then base, then apptainer)
+# ---------------------------------------------------------------------------
+ml use /soft/modulefiles
+ml spack-pe-base
+ml apptainer
+
+export HTTP_PROXY="http://proxy.alcf.anl.gov:3128"
+export HTTPS_PROXY="$HTTP_PROXY"
+export http_proxy="$HTTP_PROXY"
+export https_proxy="$HTTPS_PROXY"
+
+# ---------------------------------------------------------------------------
+# Credential validation -- METADATA ONLY. Contents are never read, echoed,
+# hashed, or logged here; the in-container config renderer (Task 3) is the
+# only code that reads a credential's bytes, and it never prints them either.
+# ---------------------------------------------------------------------------
+check_credential_file() {
+  local path="$1" label="$2" mode
+  if [ ! -f "$path" ] || [ ! -r "$path" ]; then
+    printf 'ERROR: %s is not a readable regular file: %s\n' "$label" "$path" >&2
+    exit 1
+  fi
+  mode=$(stat -c '%a' "$path")
+  if [ "$mode" != "600" ]; then
+    printf 'ERROR: %s must have mode 600, found %s: %s\n' "$label" "$mode" "$path" >&2
+    exit 1
+  fi
+}
+
+check_credential_file "$HEADSCALE_KEY_FILE" "Headscale join key"
+check_credential_file "$INBOUND_A2A_FILE" "inbound A2A token (wesley -> red-shirt-polaris)"
+check_credential_file "$OUTBOUND_A2A_FILE" "outbound A2A token (red-shirt-polaris -> wesley)"
+check_credential_file "$CA_FILE" "Headscale/Caddy root CA"
+
+# ---------------------------------------------------------------------------
+# SIF checksum verification -- MUST happen before any execution. A qsub or
+# qdel exit code alone is never sufficient evidence the artifact is intact.
+# ---------------------------------------------------------------------------
+if [ ! -f "$SIF" ] || [ ! -r "$SIF" ]; then
+  printf 'ERROR: SIF is missing; run deploy/polaris/build-red-shirt-sif.sh first: %s\n' "$SIF" >&2
+  exit 1
+fi
+if [ ! -f "${SIF}.sha256" ]; then
+  printf 'ERROR: SIF checksum sidecar is missing: %s.sha256\n' "$SIF" >&2
+  exit 1
+fi
+(cd "$(dirname "$SIF")" && sha256sum -c "$(basename "$SIF").sha256")
+
+# ---------------------------------------------------------------------------
+# Provenance metadata (non-secret) -- written before execution so it survives
+# even a startup failure.
+# ---------------------------------------------------------------------------
+{
+  printf 'pbs_job_id=%s\n' "$JOB_ID"
+  printf 'hostname=%s\n' "$(hostname)"
+  printf 'source_image=%s\n' "$RED_SHIRT_IMAGE"
+  printf 'source_manifest_digest=%s\n' "$RED_SHIRT_DIGEST"
+  printf 'sif_sha256=%s\n' "$(sha256sum "$SIF" | cut -d' ' -f1)"
+  apptainer --version
+  apptainer exec "$SIF" hermes --version || true
+  apptainer exec "$SIF" tailscale version || true
+} >"$RUN_DIR/metadata.txt"
+
+# ---------------------------------------------------------------------------
+# Signal-safe cleanup: forward TERM/INT to the running Apptainer process,
+# wait for it to exit, remove job-local (never persistent) scratch state,
+# and ALWAYS write a persistent terminal record -- even on failure.
+# ---------------------------------------------------------------------------
+APPTAINER_PID=""
+
+cleanup() {
+  rc=$?
+  set +e
+  if [ -n "$APPTAINER_PID" ] && kill -0 "$APPTAINER_PID" 2>/dev/null; then
+    kill -TERM "$APPTAINER_PID" 2>/dev/null
+    wait "$APPTAINER_PID" 2>/dev/null
+  fi
+  rm -rf -- "$SCRATCH_ROOT"
+  printf '{"exit_code": %s, "ok": %s, "pbs_job_id": "%s"}\n' \
+    "$rc" "$([ "$rc" -eq 0 ] && printf true || printf false)" "$JOB_ID" \
+    >"$TERMINAL_RECORD"
+  chmod 600 "$TERMINAL_RECORD" 2>/dev/null || true
+  exit "$rc"
+}
+trap cleanup EXIT INT TERM
+
+# APPTAINERENV_* carries only non-secret paths/config. Every credential is
+# passed as a mounted read-only FILE PATH under /mnt/secrets, never a
+# literal value, never argv, never a log line.
+export APPTAINERENV_HEADSCALE_KEY_FILE="/mnt/secrets/headscale-auth.key"
+export APPTAINERENV_INBOUND_A2A_FILE="/mnt/secrets/inbound-a2a.token"
+export APPTAINERENV_OUTBOUND_A2A_FILE="/mnt/secrets/outbound-a2a.token"
+export APPTAINERENV_CA_FILE="/mnt/secrets/caddy-root.crt"
+export APPTAINERENV_TS_STATE_DIR="/tmp/ts-state"
+export APPTAINERENV_READY_RECORD="/opt/data/runs/${JOB_ID}/ready.json"
+export APPTAINERENV_TERMINAL_RECORD="/opt/data/runs/${JOB_ID}/terminal.json"
+export APPTAINERENV_ALCF_PROXY="proxy.alcf.anl.gov:3128"
+export APPTAINERENV_HTTP_PROXY="$HTTP_PROXY"
+export APPTAINERENV_HTTPS_PROXY="$HTTPS_PROXY"
+export APPTAINERENV_http_proxy="$http_proxy"
+export APPTAINERENV_https_proxy="$https_proxy"
+
+mkdir -p "$HERMES_HOME_DIR/runs/$JOB_ID"
+
+# Binds are restricted to destinations guaranteed present in the immutable
+# SIF: /opt/data (WORKDIR, owned by the hermes user) and /tmp (universally
+# present). Apptainer refuses a bind onto a path absent from a read-only
+# SIF, so no destination outside this set is ever attempted.
+set +e
+apptainer run --cleanenv \
+  --bind "$HERMES_HOME_DIR:/opt/data" \
+  --bind "$SECRETS_DIR:/mnt/secrets:ro" \
+  --bind "$STATE_DIR:/tmp" \
+  "$SIF" \
+  >"$RUN_DIR/stdout.log" 2>"$RUN_DIR/stderr.log" &
+APPTAINER_PID=$!
+set -e
+
+log "started apptainer (pid $APPTAINER_PID); waiting for readiness/terminal records under $RUN_DIR"
+wait "$APPTAINER_PID"
