@@ -26,6 +26,7 @@ DEPLOY = ROOT / "deploy" / "polaris"
 BUILD = DEPLOY / "build-red-shirt-sif.sh"
 PBS = DEPLOY / "red-shirt-polaris.pbs"
 README = DEPLOY / "RED_SHIRT_README.md"
+DOCKERFILE = ROOT / "Dockerfile.red-shirt-polaris"
 
 
 def text(path: Path) -> str:
@@ -232,6 +233,54 @@ def test_pbs_binds_only_to_destinations_guaranteed_present_in_image():
     allowed = {"/opt/data", "/mnt/secrets", "/tmp"}
     for dest in destinations:
         assert dest in allowed, f"unexpected bind destination not verified present in image: {dest}"
+
+
+def test_dockerfile_creates_the_secrets_bind_mountpoint():
+    """The PBS launcher binds the read-only secret/CA directory to
+    /mnt/secrets (see test_pbs_binds_secrets_read_only_to_an_existing_image_destination
+    above), but Apptainer refuses to bind onto a destination that does not
+    already exist inside the read-only SIF. The Dockerfile must therefore
+    actually create /mnt/secrets as a dedicated, non-root-readable directory
+    -- not merely have the launcher/tests assume or allowlist it -- and do
+    so while still root, before the final USER hermes switch."""
+    lines = text(DOCKERFILE).splitlines()
+    body = "\n".join(lines)
+
+    mkdir_indices = [
+        i for i, line in enumerate(lines)
+        if re.search(r"\bmkdir\s+(-p\s+)?/mnt/secrets\b", line)
+    ]
+    assert mkdir_indices, (
+        "Dockerfile must create the /mnt/secrets bind mountpoint "
+        "(e.g. `RUN mkdir -p /mnt/secrets`) -- the launcher's "
+        "--bind \"$SECRETS_DIR:/mnt/secrets:ro\" will fail at runtime "
+        "against a read-only SIF that never created this path"
+    )
+
+    user_indices = [i for i, line in enumerate(lines) if line.startswith("USER ")]
+    assert user_indices, "no USER directive found"
+    assert all(i < user_indices[-1] for i in mkdir_indices), (
+        "the /mnt/secrets mountpoint must be created while still root, "
+        "before the final USER hermes switch"
+    )
+
+    # Dedicated, standalone destination -- must not be created as a
+    # subdirectory of /opt/red-shirt-polaris (application content) or
+    # /opt/data (the persistent HERMES_HOME bind target), and the
+    # directory itself must be non-root-readable (traversable) so the
+    # unprivileged hermes user can read files bind-mounted under it.
+    assert "/opt/red-shirt-polaris/mnt" not in body
+    assert "/opt/data/mnt" not in body
+    mode_indices = [
+        i for i, line in enumerate(lines)
+        if re.search(r"\bchmod\s+0?755\s+/mnt/secrets\b", line)
+        or re.search(r"\bchmod\s+a\+rx\s+/mnt/secrets\b", line)
+    ]
+    assert mode_indices, (
+        "/mnt/secrets must be explicitly made non-root-readable/traversable "
+        "(e.g. `chmod 0755 /mnt/secrets`) so the unprivileged hermes user "
+        "can read the read-only bind-mounted credential files under it"
+    )
 
 
 # ---------------------------------------------------------------------------

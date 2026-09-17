@@ -41,6 +41,16 @@ COPY skills/ /opt/red-shirt-polaris/skills/
 
 RUN chmod 0555 /opt/red-shirt-polaris/entrypoint.sh && chown -R hermes:hermes /opt/red-shirt-polaris
 
+# Dedicated, non-root-readable mountpoint for the read-only secret/CA bind
+# (see deploy/polaris/red-shirt-polaris.pbs: --bind "$SECRETS_DIR:/mnt/secrets:ro").
+# Apptainer refuses to bind onto a destination absent from the read-only SIF,
+# so this directory must exist in the image itself, not merely be
+# allowlisted by the launcher's own tests. It is a standalone top-level
+# path -- not nested under /opt/red-shirt-polaris (application content) or
+# /opt/data (the persistent HERMES_HOME bind target) -- so the read-only
+# secrets bind can never shadow either.
+RUN mkdir -p /mnt/secrets && chmod 0755 /mnt/secrets
+
 # Bake the source commit so the running agent can report unambiguous
 # provenance (CI passes ALCF_GIT_SHA=${{ github.sha }}; local builds default
 # to "dev").
