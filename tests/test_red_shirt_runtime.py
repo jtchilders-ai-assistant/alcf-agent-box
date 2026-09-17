@@ -1066,6 +1066,7 @@ class TestEntrypointLifecycle:
             "RED_SHIRT_HERMES_CMD": str(hermes),
             "RED_SHIRT_JOB_ROOT": str(job_root),
             "RED_SHIRT_TERMINAL_OUTPUT": str(term_out),
+            "RED_SHIRT_TEST_MODE": "1",
         })
         assert result.returncode == 7, result.stderr
         record = json.loads(term_out.read_text())
@@ -1086,6 +1087,7 @@ class TestEntrypointLifecycle:
             "RED_SHIRT_JOB_ROOT": str(job_root),
             "RED_SHIRT_HOME": str(home),
             "RED_SHIRT_TERMINAL_OUTPUT": str(tmp_path / "terminal.json"),
+            "RED_SHIRT_TEST_MODE": "1",
         })
         assert result.returncode == 0, result.stderr
         assert not job_root.exists(), "job-local root must be removed on exit"
@@ -1104,6 +1106,7 @@ class TestEntrypointLifecycle:
             "RED_SHIRT_JOB_ROOT": str(job_root),
             "RED_SHIRT_READY_OUTPUT": str(ready_out),
             "RED_SHIRT_TERMINAL_OUTPUT": str(tmp_path / "terminal.json"),
+            "RED_SHIRT_TEST_MODE": "1",
         })
         try:
             deadline = time.time() + 10
@@ -1139,6 +1142,7 @@ class TestEntrypointLifecycle:
             "RED_SHIRT_JOB_ROOT": str(job_root),
             "RED_SHIRT_TERM_TIMEOUT": "5",
             "RED_SHIRT_TERMINAL_OUTPUT": str(tmp_path / "terminal.json"),
+            "RED_SHIRT_TEST_MODE": "1",
         }, timeout=25)
         assert result.returncode != 0, \
             "a required support child dying must be treated as a failure"
@@ -1158,6 +1162,7 @@ class TestEntrypointLifecycle:
             "RED_SHIRT_HERMES_CMD": str(hermes),
             "RED_SHIRT_JOB_ROOT": str(job_root),
             "RED_SHIRT_TERMINAL_OUTPUT": str(tmp_path / "terminal.json"),
+            "RED_SHIRT_TEST_MODE": "1",
         })
         try:
             time.sleep(1.0)
@@ -1187,6 +1192,7 @@ class TestEntrypointLifecycle:
             "RED_SHIRT_JOB_ROOT": str(job_root),
             "RED_SHIRT_TERM_TIMEOUT": "2",
             "RED_SHIRT_TERMINAL_OUTPUT": str(tmp_path / "terminal.json"),
+            "RED_SHIRT_TEST_MODE": "1",
         })
         try:
             deadline = time.time() + 10
@@ -1215,11 +1221,145 @@ class TestEntrypointLifecycle:
             "RED_SHIRT_TERMINAL_OUTPUT": str(term_out),
             "RED_SHIRT_READY_OUTPUT": str(ready_out),
             "RED_SHIRT_TEST_AMBIENT_SECRET": secret,
+            "RED_SHIRT_TEST_MODE": "1",
         })
         assert secret not in result.stdout
         assert secret not in result.stderr
         assert secret not in term_out.read_text()
         assert secret not in ready_out.read_text()
+
+
+# ---------------------------------------------------------------------------
+# Task 7A: production job-root cleanup path guard (hostile paths)
+#
+# Reviewer-reproduced finding: scripts/red_shirt_entrypoint.sh accepted
+# RED_SHIRT_JOB_ROOT verbatim and `rm -rf`'d it, so RED_SHIRT_JOB_ROOT equal
+# to persistent HERMES_HOME deleted that home with rc=0. These tests exercise
+# the PRODUCTION path (no RED_SHIRT_TEST_MODE) and prove the fail-closed
+# guard rejects every hostile input before any child is launched or any path
+# is created/chmod/removed, while a genuinely valid root still works end to
+# end and only the validated root is removed.
+# ---------------------------------------------------------------------------
+
+class TestEntrypointJobRootProductionGuard:
+    def test_valid_production_root_succeeds_and_only_root_is_removed(self, tmp_path):
+        job_parent = tmp_path / "parent"
+        job_parent.mkdir()
+        job_root = job_parent / "job-123"
+        home = tmp_path / "home"
+        home.mkdir()
+        (home / "persistent.marker").write_text("keep-me")
+        hermes = _write_exec_script(tmp_path / "fake_hermes.sh",
+                                     "#!/usr/bin/env bash\nexit 0\n")
+        result = _run_entrypoint({
+            "RED_SHIRT_HERMES_CMD": str(hermes),
+            "RED_SHIRT_JOB_PARENT": str(job_parent),
+            "RED_SHIRT_JOB_ROOT": str(job_root),
+            "HERMES_HOME": str(home),
+            "RED_SHIRT_TERMINAL_OUTPUT": str(tmp_path / "terminal.json"),
+        })
+        assert result.returncode == 0, result.stderr
+        assert not job_root.exists(), "validated job root must be removed on exit"
+        assert job_parent.is_dir(), "the parent directory itself must survive"
+        assert (home / "persistent.marker").is_file(), \
+            "HERMES_HOME must never be touched by a valid run"
+
+    def test_root_equal_to_hermes_home_fails_before_hermes_and_preserves_home(self, tmp_path):
+        job_parent = tmp_path / "parent"
+        job_parent.mkdir()
+        home = job_parent / "home"
+        home.mkdir()
+        (home / "marker").write_text("keep-me")
+        hermes_marker = tmp_path / "hermes-launched.marker"
+        hermes = _write_exec_script(
+            tmp_path / "fake_hermes.sh",
+            f"#!/usr/bin/env bash\ntouch {shlex.quote(str(hermes_marker))}\nexit 0\n",
+        )
+        result = _run_entrypoint({
+            "RED_SHIRT_HERMES_CMD": str(hermes),
+            "RED_SHIRT_JOB_PARENT": str(job_parent),
+            "RED_SHIRT_JOB_ROOT": str(home),
+            "HERMES_HOME": str(home),
+            "RED_SHIRT_TERMINAL_OUTPUT": str(tmp_path / "terminal.json"),
+        })
+        assert result.returncode != 0, \
+            "RED_SHIRT_JOB_ROOT == HERMES_HOME must be rejected"
+        assert not hermes_marker.exists(), "Hermes must never be launched"
+        assert home.is_dir(), "HERMES_HOME must survive"
+        assert (home / "marker").is_file(), "HERMES_HOME contents must survive"
+
+    def test_root_outside_parent_fails_before_hermes(self, tmp_path):
+        job_parent = tmp_path / "parent"
+        job_parent.mkdir()
+        job_root = tmp_path / "elsewhere" / "job"
+        home = tmp_path / "home"
+        home.mkdir()
+        hermes_marker = tmp_path / "hermes-launched.marker"
+        hermes = _write_exec_script(
+            tmp_path / "fake_hermes.sh",
+            f"#!/usr/bin/env bash\ntouch {shlex.quote(str(hermes_marker))}\nexit 0\n",
+        )
+        result = _run_entrypoint({
+            "RED_SHIRT_HERMES_CMD": str(hermes),
+            "RED_SHIRT_JOB_PARENT": str(job_parent),
+            "RED_SHIRT_JOB_ROOT": str(job_root),
+            "HERMES_HOME": str(home),
+            "RED_SHIRT_TERMINAL_OUTPUT": str(tmp_path / "terminal.json"),
+        })
+        assert result.returncode != 0, \
+            "a root outside the declared parent must be rejected"
+        assert not hermes_marker.exists(), "Hermes must never be launched"
+        assert not job_root.exists(), "the rejected root must never be created"
+
+    def test_symlinked_root_fails_before_hermes(self, tmp_path):
+        job_parent = tmp_path / "parent"
+        job_parent.mkdir()
+        real_target = tmp_path / "real-target"
+        real_target.mkdir()
+        job_root = job_parent / "job-symlink"
+        job_root.symlink_to(real_target, target_is_directory=True)
+        home = tmp_path / "home"
+        home.mkdir()
+        hermes_marker = tmp_path / "hermes-launched.marker"
+        hermes = _write_exec_script(
+            tmp_path / "fake_hermes.sh",
+            f"#!/usr/bin/env bash\ntouch {shlex.quote(str(hermes_marker))}\nexit 0\n",
+        )
+        result = _run_entrypoint({
+            "RED_SHIRT_HERMES_CMD": str(hermes),
+            "RED_SHIRT_JOB_PARENT": str(job_parent),
+            "RED_SHIRT_JOB_ROOT": str(job_root),
+            "HERMES_HOME": str(home),
+            "RED_SHIRT_TERMINAL_OUTPUT": str(tmp_path / "terminal.json"),
+        })
+        assert result.returncode != 0, "a symlinked job root must be rejected"
+        assert not hermes_marker.exists(), "Hermes must never be launched"
+        assert real_target.is_dir(), "the symlink target must never be touched"
+
+    def test_symlinked_parent_component_fails_before_hermes(self, tmp_path):
+        real_parent = tmp_path / "real-parent"
+        real_parent.mkdir()
+        parent_link = tmp_path / "parent-link"
+        parent_link.symlink_to(real_parent, target_is_directory=True)
+        job_root = parent_link / "job"
+        home = tmp_path / "home"
+        home.mkdir()
+        hermes_marker = tmp_path / "hermes-launched.marker"
+        hermes = _write_exec_script(
+            tmp_path / "fake_hermes.sh",
+            f"#!/usr/bin/env bash\ntouch {shlex.quote(str(hermes_marker))}\nexit 0\n",
+        )
+        result = _run_entrypoint({
+            "RED_SHIRT_HERMES_CMD": str(hermes),
+            "RED_SHIRT_JOB_PARENT": str(parent_link),
+            "RED_SHIRT_JOB_ROOT": str(job_root),
+            "HERMES_HOME": str(home),
+            "RED_SHIRT_TERMINAL_OUTPUT": str(tmp_path / "terminal.json"),
+        })
+        assert result.returncode != 0, \
+            "a symlinked path component in RED_SHIRT_JOB_PARENT must be rejected"
+        assert not hermes_marker.exists(), "Hermes must never be launched"
+        assert not job_root.exists(), "the rejected root must never be created"
 
 
 if __name__ == "__main__":

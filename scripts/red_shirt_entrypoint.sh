@@ -21,6 +21,101 @@ TERMINAL_OUTPUT="${RED_SHIRT_TERMINAL_OUTPUT:-}"
 READY_OUTPUT="${RED_SHIRT_READY_OUTPUT:-}"
 SUPPORT_CMD="${RED_SHIRT_SUPPORT_CMD:-}"
 
+# Fail-closed production job-root guard. RED_SHIRT_TEST_MODE=1 keeps the
+# legacy minimal behavior used by pre-existing lifecycle tests; every other
+# invocation must pass this validation, in full, before any child process is
+# launched or any filesystem path is created/chmod/removed.
+if [ "${RED_SHIRT_TEST_MODE:-}" != "1" ]; then
+  if ! CANON_JOB_ROOT=$(python3 - "${RED_SHIRT_JOB_PARENT:-}" "${RED_SHIRT_JOB_ROOT:-}" "${HERMES_HOME:-}" <<'PYEOF'
+import os
+import sys
+
+job_parent, job_root, hermes_home = sys.argv[1:4]
+
+
+def fail(msg):
+    print("red_shirt_entrypoint: " + msg, file=sys.stderr)
+    sys.exit(1)
+
+
+for name, val in (
+    ("RED_SHIRT_JOB_PARENT", job_parent),
+    ("RED_SHIRT_JOB_ROOT", job_root),
+    ("HERMES_HOME", hermes_home),
+):
+    if not val:
+        fail(f"{name} must be a nonempty absolute path")
+    if not os.path.isabs(val):
+        fail(f"{name} must be an absolute path")
+    if os.path.normpath(val) == "/":
+        fail(f"{name} must not be '/'")
+
+
+def iter_prefixes(path):
+    p = path.rstrip("/")
+    parts = [part for part in p.split("/") if part]
+    cur = ""
+    for part in parts:
+        cur += "/" + part
+        yield cur
+
+
+def find_symlink_component(path):
+    for prefix in iter_prefixes(path):
+        if os.path.islink(prefix):
+            return prefix
+    return None
+
+link = find_symlink_component(job_parent)
+if link:
+    fail(f"RED_SHIRT_JOB_PARENT contains a symlink component: {link}")
+
+if not os.path.isdir(job_parent):
+    fail("RED_SHIRT_JOB_PARENT must be an existing directory")
+
+link = find_symlink_component(job_root)
+if link:
+    fail(f"RED_SHIRT_JOB_ROOT contains a symlink component: {link}")
+
+if os.path.lexists(job_root):
+    if os.path.islink(job_root):
+        fail("RED_SHIRT_JOB_ROOT must not be a symlink")
+    if not os.path.isdir(job_root):
+        fail("RED_SHIRT_JOB_ROOT exists and is not a directory")
+    st = os.stat(job_root)
+    if st.st_uid != os.getuid():
+        fail("RED_SHIRT_JOB_ROOT exists but is not owned by the current user")
+
+canon_parent = os.path.realpath(job_parent)
+canon_root = os.path.realpath(job_root)
+canon_home = os.path.realpath(hermes_home)
+
+rel = os.path.relpath(canon_root, canon_parent)
+if rel == "." or rel.startswith(".."):
+    fail("RED_SHIRT_JOB_ROOT must be a strict descendant of RED_SHIRT_JOB_PARENT")
+
+
+def overlaps(a, b):
+    if a == b:
+        return True
+    if not os.path.relpath(a, b).startswith(".."):
+        return True
+    if not os.path.relpath(b, a).startswith(".."):
+        return True
+    return False
+
+if overlaps(canon_root, canon_home):
+    fail("RED_SHIRT_JOB_ROOT must not overlap with HERMES_HOME")
+
+print(canon_root)
+PYEOF
+  ); then
+    exit 2
+  fi
+  JOB_ROOT="$CANON_JOB_ROOT"
+  mkdir -m 0700 -p -- "$JOB_ROOT"
+fi
+
 declare -a OWNED_PIDS=()
 HERMES_PID=""
 SUPPORT_PID=""
