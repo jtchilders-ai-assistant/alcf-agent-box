@@ -31,12 +31,25 @@ module use /soft/modulefiles
 module load spack-pe-base
 module load apptainer
 
+AUTH_HELPER="/opt/red-shirt-polaris/alcf_combined_auth.py"
+AUTH_HELPER_BIND=()
+if [ -n "${RED_SHIRT_AUTH_HELPER:-}" ]; then
+  if [ ! -r "$RED_SHIRT_AUTH_HELPER" ] || [ ! -f "$RED_SHIRT_AUTH_HELPER" ]; then
+    printf 'ERROR: RED_SHIRT_AUTH_HELPER is not a readable file: %s\n' \
+      "$RED_SHIRT_AUTH_HELPER" >&2
+    exit 1
+  fi
+  AUTH_HELPER="/run/red-shirt-auth-helper.py"
+  AUTH_HELPER_BIND=(--bind "$RED_SHIRT_AUTH_HELPER:/run/red-shirt-auth-helper.py:ro")
+fi
+
 exec apptainer exec --cleanenv \
   --env HOME=/opt/data \
   --env HERMES_HOME=/opt/data \
   --env ALCF_ENABLE_IRI="$ENABLE_IRI" \
   --env ALCF_ENABLE_GLOBUS_COMPUTE="$ENABLE_COMPUTE" \
   --bind "$BASE_DIR/home:/opt/data" \
+  "${AUTH_HELPER_BIND[@]}" \
   "$SIF" \
   /opt/hermes/.venv/bin/python \
-  /opt/red-shirt-polaris/alcf_combined_auth.py "$ACTION"
+  "$AUTH_HELPER" "$ACTION"

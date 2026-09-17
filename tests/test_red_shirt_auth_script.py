@@ -12,5 +12,8 @@ def test_authentication_script_is_safe_and_persistent():
     assert '--bind "$BASE_DIR/home:/opt/data"' in body
     assert 'ALCF_ENABLE_IRI="$ENABLE_IRI"' in body
     assert 'ALCF_ENABLE_GLOBUS_COMPUTE="$ENABLE_COMPUTE"' in body
-    assert '/opt/red-shirt-polaris/alcf_combined_auth.py "$ACTION"' in body
+    assert 'AUTH_HELPER="/opt/red-shirt-polaris/alcf_combined_auth.py"' in body
+    assert 'AUTH_HELPER_BIND=()' in body
+    assert '--bind "$RED_SHIRT_AUTH_HELPER:/run/red-shirt-auth-helper.py:ro"' in body
+    assert 'AUTH_HELPER="/run/red-shirt-auth-helper.py"' in body
     assert "get_access_token" not in body
