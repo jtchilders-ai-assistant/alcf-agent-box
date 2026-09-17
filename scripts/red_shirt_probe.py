@@ -369,7 +369,7 @@ def probe_inference(base_url: str, model: str, token_file: str,
     body = {
         "model": model,
         "messages": [{"role": "user", "content": "Reply with exactly one word: pong."}],
-        "max_tokens": 16,
+        "max_tokens": 400,
     }
     headers = {"Authorization": f"Bearer {token}"}
     url = base_url.rstrip("/") + "/chat/completions"

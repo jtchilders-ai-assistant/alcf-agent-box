@@ -211,6 +211,7 @@ class FakeInferenceServer(_JSONHandler):
     expected_token: str = ""
     content: "str | None" = "pong"
     status: int = 200
+    received_bodies: list[dict] = []
 
     def do_POST(self):  # noqa: N802
         raw = self._read_body()
@@ -218,6 +219,7 @@ class FakeInferenceServer(_JSONHandler):
             body = json.loads(raw.decode("utf-8"))
         except Exception:
             body = {}
+        type(self).received_bodies.append(body)
         auth = self.headers.get("Authorization", "")
         if self.expected_token and auth != f"Bearer {self.expected_token}":
             self._send_json(401, {"error": "unauthorized"})
@@ -382,6 +384,7 @@ def inference_server():
     FakeInferenceServer.content = "pong"
     FakeInferenceServer.status = 200
     FakeInferenceServer.expected_token = "inference-access-token-1234567890"
+    FakeInferenceServer.received_bodies = []
     srv = _start(FakeInferenceServer)
     yield srv
     srv.shutdown()
@@ -764,6 +767,15 @@ class TestProbeInference:
         assert result.returncode == 0, result.stderr
         payload = json.loads(result.stdout)
         assert payload["ok"] is True
+
+    def test_reasoning_model_probe_uses_enough_output_budget(self, inference_server, tmp_path):
+        token_file = _write_token(tmp_path, FakeInferenceServer.expected_token)
+        result = run_cli([
+            "inference", "--base-url", _free_addr(inference_server),
+            "--model", "openai/gpt-oss-120b", "--token-file", str(token_file),
+        ])
+        assert result.returncode == 0, result.stderr
+        assert FakeInferenceServer.received_bodies[-1]["max_tokens"] >= 400
 
     def test_null_content_rejected(self, inference_server, tmp_path):
         FakeInferenceServer.content = None
