@@ -12,6 +12,7 @@ Run: pytest -q tests/test_red_shirt_runtime.py
 """
 from __future__ import annotations
 
+import hashlib
 import http.server
 import json
 import os
@@ -1053,6 +1054,7 @@ class TestEntrypointLifecycle:
         job_root = tmp_path / "job"
         result = _run_entrypoint({
             "RED_SHIRT_JOB_ROOT": str(job_root),
+            "RED_SHIRT_TEST_MODE": "1",
         })
         assert result.returncode != 0
         assert "RED_SHIRT_HERMES_CMD" in result.stderr
@@ -1242,22 +1244,43 @@ class TestEntrypointLifecycle:
 # ---------------------------------------------------------------------------
 
 class TestEntrypointJobRootProductionGuard:
-    def test_valid_production_root_succeeds_and_only_root_is_removed(self, tmp_path):
+    def test_valid_production_root_succeeds_and_only_root_is_removed(self, tmp_path, monkeypatch):
+        """The positive production-guard case must run through the FULL fake
+        production environment (not just the job-root guard in isolation) so
+        it proves the validated root is removed, the parent directory
+        survives, and HERMES_HOME markers are preserved end to end -- not
+        merely that some minimal invocation happens to return 0."""
         job_parent = tmp_path / "parent"
         job_parent.mkdir()
         job_root = job_parent / "job-123"
-        home = tmp_path / "home"
-        home.mkdir()
+        a2a_port = _free_port()
+
+        env, inference_srv = _fake_runtime_env(tmp_path)
+        env["RED_SHIRT_A2A_PORT"] = str(a2a_port)
+        env["RED_SHIRT_JOB_PARENT"] = str(job_parent)
+        env["RED_SHIRT_JOB_ROOT"] = str(job_root)
+        home = Path(env["RED_SHIRT_HOME"])
         (home / "persistent.marker").write_text("keep-me")
-        hermes = _write_exec_script(tmp_path / "fake_hermes.sh",
-                                     "#!/usr/bin/env bash\nexit 0\n")
-        result = _run_entrypoint({
-            "RED_SHIRT_HERMES_CMD": str(hermes),
-            "RED_SHIRT_JOB_PARENT": str(job_parent),
-            "RED_SHIRT_JOB_ROOT": str(job_root),
-            "HERMES_HOME": str(home),
-            "RED_SHIRT_TERMINAL_OUTPUT": str(tmp_path / "terminal.json"),
-        })
+        env["HERMES_HOME"] = str(home)
+
+        FakeCardServer.received_paths = []
+        card_srv = http.server.HTTPServer(("127.0.0.1", a2a_port), FakeCardServer)
+        threading.Thread(target=card_srv.serve_forever, daemon=True).start()
+        try:
+            # Hermes exits on its own with rc=0 once the earlier startup
+            # gates and both Agent Card checks have had time to complete,
+            # so this exercises a genuine end-to-end successful run (not a
+            # SIGTERM-driven teardown like the ordering tests below).
+            hermes = tmp_path / "bin" / "hermes"
+            hermes.write_text("#!/usr/bin/env bash\nsleep 8\nexit 0\n")
+            hermes.chmod(0o755)
+            env["RED_SHIRT_HERMES_BIN"] = str(hermes)
+
+            result = _run_entrypoint_production(env, timeout=40)
+        finally:
+            card_srv.shutdown()
+            Path(env["RED_SHIRT_TS_SOCKET"]).unlink(missing_ok=True)
+
         assert result.returncode == 0, result.stderr
         assert not job_root.exists(), "validated job root must be removed on exit"
         assert job_parent.is_dir(), "the parent directory itself must survive"
@@ -1399,6 +1422,482 @@ class TestEntrypointJobRootProductionGuard:
             "a symlinked path component in RED_SHIRT_JOB_PARENT must be rejected"
         assert not hermes_marker.exists(), "Hermes must never be launched"
         assert not job_root.exists(), "the rejected root must never be created"
+
+
+# ---------------------------------------------------------------------------
+# Task 7B: production runtime orchestration (scripts/red_shirt_entrypoint.sh
+# without RED_SHIRT_TEST_MODE=1)
+#
+# Design: docs/superpowers/specs/2026-09-16-red-shirt-polaris-design.md
+# Plan:   docs/superpowers/plans/2026-09-16-red-shirt-polaris.md (Task 5/6)
+#
+# All external binaries (tailscaled, tailscale, hermes, the token helper) are
+# fake executables/sockets/HTTP that append events to a shared log file so
+# exact gate order can be asserted. connect_proxy.py and red_shirt_probe.py
+# are the REAL scripts under test (not faked) so this exercises real
+# sockets/HTTP for the readiness gates this card owns.
+# ---------------------------------------------------------------------------
+
+FAKE_BIN_TEMPLATE = """#!/usr/bin/env bash
+echo "$FAKE_EVENT" >> "$FAKE_LOG"
+{body}
+"""
+
+
+def _fake_runtime_env(tmp_path: Path, *, hermes_body: str = None,
+                       tailscaled_body: str = None, tailscale_body: str = None,
+                       token_helper_ok: bool = True,
+                       inference_ok: bool = True) -> dict:
+    """Build a full production-path environment with fake external binaries.
+
+    Real scripts (connect_proxy.py, red_shirt_probe.py, red_shirt_config.py)
+    are used unmodified; only tailscaled/tailscale/hermes/token-helper are
+    faked, plus a fake inference HTTP server the fake token-helper/renderer
+    point at via a catalog/jobs fixture pair.
+    """
+    events_log = tmp_path / "events.log"
+    events_log.write_text("")
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+
+    job_root = tmp_path / "job"
+    home = tmp_path / "home"
+    home.mkdir()
+
+    # macOS caps AF_UNIX sun_path at 104 bytes (including the NUL
+    # terminator), and pytest's tmp_path is already a long, deeply nested
+    # path -- the default $JOB_ROOT/tailscaled.sock derived from it
+    # routinely overflows that limit. Use a short, collision-resistant
+    # name under /tmp instead, keyed off a hash of tmp_path so parallel
+    # test runs don't collide.
+    ts_socket = "/tmp/rs-" + hashlib.sha1(str(tmp_path).encode()).hexdigest()[:12] + ".sock"
+    assert len(ts_socket.encode()) < 90, f"fake tailscaled socket path too long: {ts_socket!r}"
+
+    headscale_key = _write_token(tmp_path, "fake-headscale-join-key-value", "headscale.key")
+    inbound_a2a = _write_token(tmp_path, "inbound-a2a-token-1234567890", "inbound.token")
+    outbound_a2a = _write_token(tmp_path, "outbound-a2a-token-1234567890", "outbound.token")
+
+    # Fake inference server + catalog/jobs fixtures for the renderer, reused
+    # for the entrypoint's own pre-Hermes inference smoke test.
+    FakeInferenceServer.content = "pong" if inference_ok else ""
+    FakeInferenceServer.status = 200
+    FakeInferenceServer.expected_token = ""  # accept-all: token-helper output not asserted here
+    inference_srv = _start(FakeInferenceServer)
+
+    catalog_fixture = tmp_path / "catalog.json"
+    catalog_fixture.write_text(json.dumps([
+        {"id": "argonne/AuroraGPT-IT-v4-0125", "framework": "vllm", "max_model_len": 128000},
+    ]))
+    jobs_fixture = tmp_path / "jobs.json"
+    jobs_fixture.write_text(json.dumps({
+        "running": [{"Models": "argonne/AuroraGPT-IT-v4-0125", "Model Status": "running"}],
+        "queued": [],
+    }))
+
+    token_helper = tmp_path / "fake_token_helper.py"
+    if token_helper_ok:
+        token_helper.write_text(
+            "#!/usr/bin/env python3\nimport sys\nprint('fake-inference-access-token')\n"
+        )
+    else:
+        token_helper.write_text(
+            "#!/usr/bin/env python3\nimport sys\nsys.exit('token helper failed')\n"
+        )
+    token_helper.chmod(0o755)
+
+    def _write_fake(name: str, body: str) -> Path:
+        p = bin_dir / name
+        p.write_text(FAKE_BIN_TEMPLATE.format(body=body))
+        p.chmod(0o755)
+        return p
+
+    tailscaled = _write_fake("tailscaled", tailscaled_body or (
+        f"SOCK=\"\"\n"
+        f"OUTPORT=\"\"\n"
+        f"for a in \"$@\"; do case \"$a\" in\n"
+        f"  --socket=*) SOCK=\"${{a#--socket=}}\";;\n"
+        f"  --outbound-http-proxy-listen=*) OUTPORT=\"${{a##*:}}\";;\n"
+        f"esac; done\n"
+        # The Unix-socket helper must model a long-running daemon: bind+listen
+        # then BLOCK in accept() (nothing ever connects) so SOCK_PID stays
+        # alive for the whole fake-tailscaled lifetime. Previously listen()
+        # returned immediately and the helper process exited right after, so
+        # the later `wait $SOCK_PID` returned instantly and tore the whole
+        # fake tailscaled down right after startup -- racing the entrypoint's
+        # required-child-death gate against READY.
+        f"python3 -c \"import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.listen(1); s.accept()\" \"$SOCK\" &\n"
+        f"SOCK_PID=$!\n"
+        # A real forwarding HTTP proxy on the outbound-http-proxy-listen port,
+        # standing in for tailscaled's userspace outbound proxy: forwards any
+        # absolute-form request (regardless of the fake tailnet hostname
+        # asked for) to the real local A2A listener, so the tailnet-path
+        # Agent Card gate has something real to hit.
+        f"python3 -c \"\n"
+        f"import http.server, os, sys, urllib.error, urllib.parse, urllib.request\n"
+        f"port = int(sys.argv[1])\n"
+        f"target_port = int(os.environ.get('RED_SHIRT_A2A_PORT', '9900'))\n"
+        # The real userspace tailscaled outbound HTTP proxy delivers tailnet
+        # traffic directly over WireGuard -- it is never itself routed
+        # through the selective ALCF CONNECT proxy that the entrypoint sets
+        # via HTTP_PROXY/http_proxy for tailscaled's OWN control-plane
+        # traffic. This fake inherits that same env (same process tree) so
+        # it must build an opener with an explicit empty ProxyHandler --
+        # otherwise urlopen picks up the inherited HTTP_PROXY/http_proxy and
+        # wrongly forwards through the CONNECT-only proxy, which rejects
+        # plain GET.
+        f"_opener = urllib.request.build_opener(urllib.request.ProxyHandler({{}}))\n"
+        f"class H(http.server.BaseHTTPRequestHandler):\n"
+        f"    def log_message(self, *a): pass\n"
+        f"    def _fwd(self):\n"
+        f"        parsed = urllib.parse.urlsplit(self.path)\n"
+        f"        target = 'http://127.0.0.1:%d%s' % (target_port, parsed.path)\n"
+        f"        if parsed.query: target += '?' + parsed.query\n"
+        f"        try:\n"
+        f"            with _opener.open(target, timeout=10) as resp:\n"
+        f"                data = resp.read()\n"
+        f"                self.send_response(resp.status)\n"
+        f"                for k, v in resp.getheaders():\n"
+        f"                    if k.lower() != 'transfer-encoding':\n"
+        f"                        self.send_header(k, v)\n"
+        f"                self.end_headers()\n"
+        f"                self.wfile.write(data)\n"
+        f"        except urllib.error.HTTPError as e:\n"
+        f"            data = e.read()\n"
+        f"            self.send_response(e.code)\n"
+        f"            self.end_headers()\n"
+        f"            self.wfile.write(data)\n"
+        f"    def do_GET(self): self._fwd()\n"
+        f"    def do_POST(self): self._fwd()\n"
+        f"http.server.HTTPServer(('127.0.0.1', port), H).serve_forever()\n"
+        f"\" \"$OUTPORT\" &\n"
+        f"PROXY_PID=$!\n"
+        f"trap 'kill $SOCK_PID $PROXY_PID 2>/dev/null; rm -f \"$SOCK\"' TERM INT EXIT\n"
+        f"wait $SOCK_PID\n"
+    ))
+    tailscale = _write_fake("tailscale", tailscale_body or (
+        "case \"$*\" in\n"
+        "  *' up '*) exit 0 ;;\n"
+        "  *' status --json'*) echo '{\"BackendState\": \"Running\"}' ;;\n"
+        "  *' ip -4'*) echo '100.64.0.9' ;;\n"
+        "  *' serve --bg --tcp='*) exit 0 ;;\n"
+        "  *' serve reset'*) exit 0 ;;\n"
+        "  *' logout'*) exit 0 ;;\n"
+        "  *) exit 0 ;;\n"
+        "esac\n"
+    ))
+    hermes = _write_fake("hermes", hermes_body or (
+        "sleep 60 &\nCHILD=$!\ntrap 'kill $CHILD 2>/dev/null; exit 143' TERM\nwait $CHILD\n"
+    ))
+
+    env = {
+        "RED_SHIRT_JOB_ROOT": str(job_root),
+        "RED_SHIRT_JOB_PARENT": str(tmp_path),
+        "RED_SHIRT_DIR": str(REPO),
+        "RED_SHIRT_CONFIG_PY": str(SCRIPTS / "red_shirt_config.py"),
+        "RED_SHIRT_PROBE_PY": str(PROBE),
+        "RED_SHIRT_CONNECT_PROXY_PY": str(SCRIPTS / "connect_proxy.py"),
+        "RED_SHIRT_PYTHON": sys.executable,
+        "RED_SHIRT_TAILSCALED_BIN": str(tailscaled),
+        "RED_SHIRT_TAILSCALE_BIN": str(tailscale),
+        "RED_SHIRT_HERMES_BIN": str(hermes),
+        "RED_SHIRT_TS_SOCKET": ts_socket,
+        "RED_SHIRT_HEADSCALE_KEY_FILE": str(headscale_key),
+        "RED_SHIRT_INBOUND_A2A_FILE": str(inbound_a2a),
+        "RED_SHIRT_OUTBOUND_A2A_FILE": str(outbound_a2a),
+        "RED_SHIRT_TOKEN_HELPER": str(token_helper),
+        "RED_SHIRT_HOME": str(home),
+        "RED_SHIRT_TEMPLATE": str(REPO / "config/red-shirt-polaris/config.template.yaml"),
+        "RED_SHIRT_CLUSTER": "sophia",
+        "RED_SHIRT_PREFERRED_MODEL": "argonne/AuroraGPT-IT-v4-0125",
+        "RED_SHIRT_A2A_PORT": "0",  # overridden per-test below where needed
+        "RED_SHIRT_WESLEY_URL": "http://100.64.0.2:9900/",
+        "RED_SHIRT_HEADSCALE_URL": "https://headscale.invalid",
+        "RED_SHIRT_HOSTNAME": "test-red-shirt",
+        "RED_SHIRT_ALCF_PROXY": "127.0.0.1:1",  # unused (renderer uses fixtures)
+        "RED_SHIRT_CATALOG_FIXTURE": str(catalog_fixture),
+        "RED_SHIRT_JOBS_FIXTURE": str(jobs_fixture),
+        "RED_SHIRT_ALCF_BASE_URL_OVERRIDE": f"http://127.0.0.1:{inference_srv.server_port}",
+        "RED_SHIRT_CONNECT_PROXY_PORT": str(_free_port()),
+        "RED_SHIRT_TS_OUTBOUND_HTTP_PORT": str(_free_port()),
+        "RED_SHIRT_TS_UP_TIMEOUT": "10",
+        "RED_SHIRT_TS_RUNNING_TIMEOUT": "10",
+        "RED_SHIRT_CARD_TIMEOUT": "15",
+        "RED_SHIRT_TERM_TIMEOUT": "5",
+        "RED_SHIRT_READY_OUTPUT": str(tmp_path / "ready.json"),
+        "RED_SHIRT_TERMINAL_OUTPUT": str(tmp_path / "terminal.json"),
+    }
+    return env, inference_srv
+
+
+def _free_port() -> int:
+    s = __import__("socket").socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+class TestProductionPathOrdering:
+    """RED_SHIRT_TEST_MODE unset (production path) must run the full ordered
+    startup sequence and refuse to start without RED_SHIRT_HERMES_CMD ever
+    being consulted -- production never depends on that test-mode variable.
+    """
+
+    def test_production_path_does_not_require_hermes_cmd(self, tmp_path, monkeypatch):
+        """Round-1 requirement: production works without RED_SHIRT_HERMES_CMD
+        (the bug the card was opened to fix)."""
+        a2a_port = _free_port()
+        env, inference_srv = _fake_runtime_env(tmp_path)
+        env["RED_SHIRT_A2A_PORT"] = str(a2a_port)
+        # A real local HTTP server standing in for the Hermes A2A listener,
+        # so the local + tailnet card gates have something real to hit.
+        FakeCardServer.received_paths = []
+        card_srv = http.server.HTTPServer(("127.0.0.1", a2a_port), FakeCardServer)
+        t = threading.Thread(target=card_srv.serve_forever, daemon=True)
+        t.start()
+        try:
+            hermes = tmp_path / "bin" / "hermes"
+            hermes.write_text(
+                "#!/usr/bin/env bash\nsleep 60 &\nCHILD=$!\n"
+                "trap 'kill $CHILD 2>/dev/null; exit 143' TERM\nwait $CHILD\n"
+            )
+            hermes.chmod(0o755)
+            env["RED_SHIRT_HERMES_BIN"] = str(hermes)
+
+            full_env = os.environ.copy()
+            full_env.update(env)
+            assert "RED_SHIRT_HERMES_CMD" not in full_env
+
+            proc = subprocess.Popen(["bash", str(ENTRYPOINT)], env=full_env,
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            out = err = None
+            try:
+                ready_path = Path(env["RED_SHIRT_READY_OUTPUT"])
+                deadline = time.time() + 40
+                while (time.time() < deadline and not ready_path.exists()
+                       and proc.poll() is None):
+                    time.sleep(0.2)
+                diag = ""
+                if not ready_path.exists() and proc.poll() is not None:
+                    # Process already exited without ever writing READY --
+                    # grab its output once so the failure is diagnosable.
+                    # The runtime is contractually non-secret, so stderr is
+                    # safe to surface verbatim (no credential contents).
+                    out, err = proc.communicate(timeout=5)
+                    diag = (f" (process exited early: returncode={proc.returncode}, "
+                             f"stderr={err!r})")
+                assert ready_path.exists(), f"production path never reached READY{diag}"
+                record = json.loads(ready_path.read_text())
+                assert record["ok"] is True
+                assert record["model"] == "argonne/AuroraGPT-IT-v4-0125"
+                assert record["tailnet_ip"]
+            finally:
+                if proc.poll() is None:
+                    proc.send_signal(signal.SIGTERM)
+                if out is None:
+                    out, err = proc.communicate(timeout=20)
+        finally:
+            card_srv.shutdown()
+            # Belt-and-suspenders: the fake tailscaled's own TERM/INT/EXIT
+            # trap removes this socket, but guard against residue if the
+            # process was killed harder than SIGTERM allows for.
+            Path(env["RED_SHIRT_TS_SOCKET"]).unlink(missing_ok=True)
+        assert proc.returncode == 143, err
+
+    def test_production_path_fails_before_hermes_if_inference_smoke_fails(self, tmp_path):
+        """No Hermes launch may occur when the direct inference smoke test
+        fails -- assert the fake hermes binary's marker file is absent."""
+        marker = tmp_path / "hermes-was-launched.marker"
+        env, inference_srv = _fake_runtime_env(tmp_path, inference_ok=False)
+        env["RED_SHIRT_A2A_PORT"] = str(_free_port())
+        hermes = tmp_path / "bin" / "hermes"
+        hermes.write_text(f"#!/usr/bin/env bash\ntouch {shlex.quote(str(marker))}\nsleep 60\n")
+        hermes.chmod(0o755)
+        env["RED_SHIRT_HERMES_BIN"] = str(hermes)
+
+        result = _run_entrypoint_production(env, timeout=40)
+        assert result.returncode != 0
+        assert not marker.exists(), "Hermes must never launch after a failed inference smoke test"
+        term = json.loads(Path(env["RED_SHIRT_TERMINAL_OUTPUT"]).read_text())
+        assert term["ok"] is False
+
+    def test_production_path_no_ready_before_local_card_passes(self, tmp_path):
+        """READY must never be written if the local Agent Card never comes up
+        (nothing listens on the A2A port here -- hermes exits immediately)."""
+        env, inference_srv = _fake_runtime_env(tmp_path)
+        env["RED_SHIRT_A2A_PORT"] = str(_free_port())
+        env["RED_SHIRT_CARD_TIMEOUT"] = "3"
+        hermes = tmp_path / "bin" / "hermes"
+        hermes.write_text("#!/usr/bin/env bash\nexit 0\n")  # exits immediately, nothing listens
+        hermes.chmod(0o755)
+        env["RED_SHIRT_HERMES_BIN"] = str(hermes)
+
+        result = _run_entrypoint_production(env, timeout=40)
+        assert result.returncode != 0
+        assert not Path(env["RED_SHIRT_READY_OUTPUT"]).exists(), \
+            "READY must not be written when the local card never comes up"
+
+    def test_production_path_required_child_death_tears_down(self, tmp_path):
+        """A required child (tailscaled) dying while Hermes is still running
+        must be detected and tear the whole run down."""
+        a2a_port = _free_port()
+        env, inference_srv = _fake_runtime_env(tmp_path)
+        env["RED_SHIRT_A2A_PORT"] = str(a2a_port)
+        env["RED_SHIRT_TS_UP_TIMEOUT"] = "5"
+        env["RED_SHIRT_TS_RUNNING_TIMEOUT"] = "5"
+
+        FakeCardServer.received_paths = []
+        card_srv = http.server.HTTPServer(("127.0.0.1", a2a_port), FakeCardServer)
+        threading.Thread(target=card_srv.serve_forever, daemon=True).start()
+        try:
+            hermes_marker = tmp_path / "hermes-alive.marker"
+            hermes = tmp_path / "bin" / "hermes"
+            hermes.write_text(
+                f"#!/usr/bin/env bash\n"
+                f"trap 'rm -f {shlex.quote(str(hermes_marker))}; exit 143' TERM\n"
+                f"touch {shlex.quote(str(hermes_marker))}\n"
+                f"sleep 60 & wait $!\n"
+            )
+            hermes.chmod(0o755)
+            env["RED_SHIRT_HERMES_BIN"] = str(hermes)
+
+            # tailscaled that exits shortly after the socket appears, to
+            # simulate the required child dying mid-run.
+            tailscaled = tmp_path / "bin" / "tailscaled"
+            tailscaled.write_text(
+                "#!/usr/bin/env bash\n"
+                "SOCK=\"\"\n"
+                "for a in \"$@\"; do case \"$a\" in --socket=*) SOCK=\"${a#--socket=}\";; esac; done\n"
+                "python3 -c \"import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.listen(1)\" \"$SOCK\" &\n"
+                "SOCK_PID=$!\n"
+                "sleep 6\n"
+                "kill $SOCK_PID 2>/dev/null\n"
+                "exit 1\n"
+            )
+            tailscaled.chmod(0o755)
+            env["RED_SHIRT_TAILSCALED_BIN"] = str(tailscaled)
+
+            result = _run_entrypoint_production(env, timeout=40)
+            assert result.returncode != 0
+            assert not hermes_marker.exists(), \
+                "Hermes must be torn down after the required tailscaled child died"
+        finally:
+            card_srv.shutdown()
+
+    def test_production_path_cleanup_serve_reset_and_logout(self, tmp_path):
+        """On teardown the entrypoint must invoke `tailscale serve reset` and
+        `tailscale logout` -- observed via the fake tailscale binary's event
+        log."""
+        a2a_port = _free_port()
+        events_log = tmp_path / "ts_events.log"
+        events_log.write_text("")
+        env, inference_srv = _fake_runtime_env(tmp_path)
+        env["RED_SHIRT_A2A_PORT"] = str(a2a_port)
+
+        FakeCardServer.received_paths = []
+        card_srv = http.server.HTTPServer(("127.0.0.1", a2a_port), FakeCardServer)
+        threading.Thread(target=card_srv.serve_forever, daemon=True).start()
+        try:
+            hermes = tmp_path / "bin" / "hermes"
+            hermes.write_text(
+                "#!/usr/bin/env bash\n"
+                "trap 'exit 143' TERM\n"
+                "sleep 60 & wait $!\n"
+            )
+            hermes.chmod(0o755)
+            env["RED_SHIRT_HERMES_BIN"] = str(hermes)
+
+            tailscale = tmp_path / "bin" / "tailscale"
+            tailscale.write_text(
+                f"#!/usr/bin/env bash\n"
+                f"echo \"$*\" >> {shlex.quote(str(events_log))}\n"
+                "case \"$*\" in\n"
+                "  *' up '*) exit 0 ;;\n"
+                "  *' status --json'*) echo '{\"BackendState\": \"Running\"}' ;;\n"
+                "  *' ip -4'*) echo '100.64.0.9' ;;\n"
+                "  *' serve --bg --tcp='*) exit 0 ;;\n"
+                "  *' serve reset'*) exit 0 ;;\n"
+                "  *' logout'*) exit 0 ;;\n"
+                "  *) exit 0 ;;\n"
+                "esac\n"
+            )
+            tailscale.chmod(0o755)
+            env["RED_SHIRT_TAILSCALE_BIN"] = str(tailscale)
+
+            full_env = os.environ.copy()
+            full_env.update(env)
+            proc = subprocess.Popen(["bash", str(ENTRYPOINT)], env=full_env,
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                ready_path = Path(env["RED_SHIRT_READY_OUTPUT"])
+                deadline = time.time() + 40
+                while time.time() < deadline and not ready_path.exists():
+                    time.sleep(0.2)
+                assert ready_path.exists()
+                proc.send_signal(signal.SIGTERM)
+                out, err = proc.communicate(timeout=20)
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.communicate(timeout=5)
+        finally:
+            card_srv.shutdown()
+
+        events_text = events_log.read_text()
+        assert "serve reset" in events_text
+        assert "logout" in events_text
+
+    def test_production_path_no_secret_in_stdout_stderr_or_records(self, tmp_path):
+        """No mounted credential value or inference token may ever appear in
+        stdout, stderr, ready.json, or terminal.json."""
+        a2a_port = _free_port()
+        env, inference_srv = _fake_runtime_env(tmp_path)
+        env["RED_SHIRT_A2A_PORT"] = str(a2a_port)
+
+        FakeCardServer.received_paths = []
+        card_srv = http.server.HTTPServer(("127.0.0.1", a2a_port), FakeCardServer)
+        threading.Thread(target=card_srv.serve_forever, daemon=True).start()
+        try:
+            hermes = tmp_path / "bin" / "hermes"
+            hermes.write_text("#!/usr/bin/env bash\ntrap 'exit 143' TERM\nsleep 60 & wait $!\n")
+            hermes.chmod(0o755)
+            env["RED_SHIRT_HERMES_BIN"] = str(hermes)
+
+            full_env = os.environ.copy()
+            full_env.update(env)
+            proc = subprocess.Popen(["bash", str(ENTRYPOINT)], env=full_env,
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                ready_path = Path(env["RED_SHIRT_READY_OUTPUT"])
+                deadline = time.time() + 40
+                while time.time() < deadline and not ready_path.exists():
+                    time.sleep(0.2)
+                assert ready_path.exists()
+                proc.send_signal(signal.SIGTERM)
+                out, err = proc.communicate(timeout=20)
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.communicate(timeout=5)
+        finally:
+            card_srv.shutdown()
+
+        secrets = ["fake-headscale-join-key-value", "inbound-a2a-token-1234567890",
+                   "outbound-a2a-token-1234567890", "fake-inference-access-token"]
+        haystacks = [out, err,
+                     Path(env["RED_SHIRT_READY_OUTPUT"]).read_text(),
+                     Path(env["RED_SHIRT_TERMINAL_OUTPUT"]).read_text()]
+        for secret in secrets:
+            for h in haystacks:
+                assert secret not in h, f"secret {secret!r} leaked"
+
+
+def _run_entrypoint_production(env_overrides: dict, timeout: float = 40) -> subprocess.CompletedProcess:
+    full_env = os.environ.copy()
+    full_env.update(env_overrides)
+    return subprocess.run(["bash", str(ENTRYPOINT)], env=full_env,
+                          capture_output=True, text=True, timeout=timeout)
 
 
 if __name__ == "__main__":
