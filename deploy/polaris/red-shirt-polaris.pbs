@@ -58,8 +58,28 @@ log() { printf '[red-shirt-pbs] %s\n' "$*"; }
 mkdir -p "$RUN_DIR"
 chmod 700 "$RUN_DIR"
 
+CLEANUP_DONE=""
+
+# ---------------------------------------------------------------------------
+# Signal handling. `trap cleanup EXIT INT TERM` alone is not signal-safe:
+# bash defers delivery of a trapped signal until the current foreground
+# command returns, so if that foreground command (e.g. a slow `ml` module
+# load) happens to finish on its own right after the signal arrives, the
+# single shared handler re-enters with `$?` set to the foreground command's
+# own (successful) exit status -- NOT the signal -- and wrongly persists
+# terminal.json with exit_code: 0 / ok: true. Dedicated INT/TERM handlers
+# capture the fact that a signal was received and force a stable nonzero
+# status (128+signum) into the record regardless of what `$?` happens to
+# be when the handler actually runs. CLEANUP_DONE guards against running
+# the body twice: a TERM/INT handler that itself calls `exit` re-enters the
+# EXIT trap, and PBS/qdel can deliver more than one signal.
+# ---------------------------------------------------------------------------
 cleanup() {
-  rc=$?
+  local rc="$1"
+  if [ -n "$CLEANUP_DONE" ]; then
+    return 0
+  fi
+  CLEANUP_DONE=1
   set +e
   if [ -n "$APPTAINER_PID" ] && kill -0 "$APPTAINER_PID" 2>/dev/null; then
     kill -TERM "$APPTAINER_PID" 2>/dev/null
@@ -70,9 +90,22 @@ cleanup() {
     "$rc" "$([ "$rc" -eq 0 ] && printf true || printf false)" "$JOB_ID" \
     >"$TERMINAL_RECORD"
   chmod 600 "$TERMINAL_RECORD" 2>/dev/null || true
-  exit "$rc"
 }
-trap cleanup EXIT INT TERM
+
+on_exit() {
+  cleanup "$?"
+}
+
+on_signal() {
+  local sig_rc="$1"
+  cleanup "$sig_rc"
+  trap - EXIT INT TERM
+  exit "$sig_rc"
+}
+
+trap on_exit EXIT
+trap 'on_signal 130' INT
+trap 'on_signal 143' TERM
 
 # ---------------------------------------------------------------------------
 # Modules (verified order: use, then base, then apptainer)

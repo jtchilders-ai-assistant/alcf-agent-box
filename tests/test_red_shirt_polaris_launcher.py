@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import json
 import re
+import signal
 import subprocess
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -249,7 +251,14 @@ def test_pbs_never_exposes_a_dashboard_or_public_listener():
 
 def test_pbs_traps_signals_and_forwards_to_the_apptainer_process():
     body = text(PBS)
-    assert re.search(r"trap\s+cleanup\s+EXIT\s+INT\s+TERM", body)
+    # EXIT, INT, and TERM must each be trapped -- via dedicated handlers,
+    # not necessarily the single combined `trap cleanup EXIT INT TERM` form,
+    # since a single shared handler cannot distinguish a deferred signal
+    # from an ordinary command failure (see the SIGTERM regression test
+    # below for why that distinction matters).
+    assert re.search(r"trap\s+\S+\s+EXIT\b", body)
+    assert re.search(r"trap\s+\S+\s+INT\b", body) or re.search(r"trap\s+'[^']*'\s+INT\b", body)
+    assert re.search(r"trap\s+\S+\s+TERM\b", body) or re.search(r"trap\s+'[^']*'\s+TERM\b", body)
     assert "kill -TERM \"$APPTAINER_PID\"" in body
     assert 'wait "$APPTAINER_PID"' in body
 
@@ -361,3 +370,98 @@ def test_readme_requires_repolling_qstat_after_qdel():
 def test_readme_never_recommends_qsub_v_for_secrets():
     body = text(README)
     assert not re.search(r"qsub\s+-v\s+\S*(?:token|key|secret|auth)", body, re.I)
+
+
+# ---------------------------------------------------------------------------
+# SIGTERM regression: `trap cleanup EXIT INT TERM` defers signal delivery
+# until the current foreground command returns. If that command happens to
+# finish on its own (e.g. a slow `ml` module load) before the signal is
+# actually delivered, bash re-enters the trap with `$?` reflecting the
+# foreground command's own (successful) exit status -- NOT the signal --
+# so cleanup wrongly records exit_code: 0 / ok: true and the script exits
+# 0 despite having been sent SIGTERM. This must be fixed with dedicated
+# INT/TERM handlers that force a nonzero, signal-derived status and guard
+# against the EXIT trap re-running the same cleanup a second time.
+# ---------------------------------------------------------------------------
+
+def test_pbs_preserves_signal_failure_status_on_sigterm(tmp_path):
+    """Behavioral regression test for the reviewer-reported signal bug.
+
+    A controllable foreground `ml` shim sleeps for a few seconds (standing
+    in for a slow module load) before returning 0. SIGTERM is sent to the
+    launcher process partway through that sleep. Because the foreground
+    child is not itself a signal target here (only the launcher's own pid
+    is signalled), bash defers trap delivery until the foreground `ml`
+    command returns successfully. On the buggy launcher this makes cleanup
+    observe rc=0 from the completed `ml` call and persist a false-positive
+    terminal.json (ok: true, exit_code: 0) with process exit status 0. The
+    fixed launcher must instead report the process as killed/nonzero and
+    persist terminal.json with ok: false and a nonzero exit_code -- and it
+    must do so exactly once (no double cleanup through both a signal
+    handler and the EXIT trap).
+    """
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    job_id = "sigterm-test.0"
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    # `ml` stands in for the real module command: it sleeps long enough for
+    # the test to deliver SIGTERM mid-sleep, then exits 0 on its own -- this
+    # is the exact deferred-signal scenario the reviewer reproduced.
+    ml_shim = bin_dir / "ml"
+    ml_shim.write_text("#!/bin/sh\nsleep 3\nexit 0\n")
+    ml_shim.chmod(0o755)
+
+    env = {
+        "HOME": str(fake_home),
+        "USER": "redshirt-test",
+        "PATH": f"{bin_dir}:/usr/bin:/bin:/usr/sbin:/sbin",
+        "PBS_JOBID": job_id,
+        # Deliberately omit RED_SHIRT_IMAGE / RED_SHIRT_DIGEST: this proves
+        # the signal is what terminates the script, not a downstream gate
+        # the script would have hit anyway once `ml` returns.
+    }
+
+    proc = subprocess.Popen(
+        ["bash", str(PBS)],
+        cwd=str(ROOT),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    # Give the launcher time to create RUN_DIR, install the trap, and enter
+    # the foreground `ml` calls before signalling it.
+    time.sleep(1.0)
+    proc.send_signal(signal.SIGTERM)
+
+    try:
+        stdout, stderr = proc.communicate(timeout=15)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        stdout, stderr = proc.communicate()
+        raise AssertionError(
+            "launcher did not exit within 15s of SIGTERM; "
+            f"stdout={stdout!r} stderr={stderr!r}"
+        )
+
+    assert proc.returncode != 0, (
+        "launcher must exit nonzero on SIGTERM, not persist the completed "
+        f"foreground command's own success status; stdout={stdout!r} "
+        f"stderr={stderr!r}"
+    )
+
+    terminal_record = fake_home / "red-shirt-polaris" / "runs" / job_id / "terminal.json"
+    assert terminal_record.is_file(), (
+        "launcher must persist terminal.json on SIGTERM; "
+        f"stdout={stdout!r} stderr={stderr!r}"
+    )
+    payload = json.loads(terminal_record.read_text())
+    assert payload["ok"] is False, (
+        f"terminal.json must record ok: false for a SIGTERM exit, got {payload}"
+    )
+    assert payload["exit_code"] != 0, (
+        f"terminal.json must record a nonzero exit_code for a SIGTERM exit, got {payload}"
+    )
+    assert payload["pbs_job_id"] == job_id
