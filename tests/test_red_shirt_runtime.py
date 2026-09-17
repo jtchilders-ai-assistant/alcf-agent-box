@@ -15,6 +15,9 @@ from __future__ import annotations
 import http.server
 import json
 import os
+import re
+import shlex
+import signal
 import subprocess
 import sys
 import threading
@@ -980,6 +983,243 @@ class TestReadyRecord:
                        for a in ForwardingHTTPProxy.received_authorities)
         assert not any("red-shirt-fake-wesley.invalid:9900" in a
                        for a in AlcfForwardHTTPProxy.received_authorities)
+
+
+# ---------------------------------------------------------------------------
+# Task 5: process-supervision entrypoint (scripts/red_shirt_entrypoint.sh)
+#
+# Design: docs/superpowers/specs/2026-09-16-red-shirt-polaris-design.md
+# Plan:   docs/superpowers/plans/2026-09-16-red-shirt-polaris.md (Task 5)
+#
+# This card is deliberately scoped to process lifecycle only: owned-PID
+# tracking (never pgrep/pkill), foreground wait on the Hermes child,
+# detection of a required support child dying, TERM/INT forwarding, bounded
+# TERM-then-KILL escalation, job-local vs persistent state handling, and
+# non-secret JSON evidence records. The ordered network/auth/readiness
+# pipeline is explicitly out of scope for this increment.
+# ---------------------------------------------------------------------------
+
+ENTRYPOINT = SCRIPTS / "red_shirt_entrypoint.sh"
+
+
+def _write_exec_script(path: Path, body: str) -> Path:
+    path.write_text(body, encoding="utf-8")
+    path.chmod(0o700)
+    return path
+
+
+def _run_entrypoint(env_overrides: dict, timeout: float = 20) -> subprocess.CompletedProcess:
+    full_env = os.environ.copy()
+    full_env.update(env_overrides)
+    return subprocess.run(
+        ["bash", str(ENTRYPOINT)],
+        capture_output=True, text=True, timeout=timeout, env=full_env,
+    )
+
+
+def _start_entrypoint(env_overrides: dict) -> subprocess.Popen:
+    full_env = os.environ.copy()
+    full_env.update(env_overrides)
+    return subprocess.Popen(
+        ["bash", str(ENTRYPOINT)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=full_env,
+    )
+
+
+class TestEntrypointStatic:
+    def test_entrypoint_exists_and_syntax_ok(self):
+        assert ENTRYPOINT.is_file(), f"missing {ENTRYPOINT}"
+        result = subprocess.run(["bash", "-n", str(ENTRYPOINT)],
+                                 capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+
+    def test_entrypoint_uses_strict_mode_and_umask(self):
+        text = ENTRYPOINT.read_text(encoding="utf-8")
+        assert "set -euo pipefail" in text
+        assert "umask 077" in text
+
+    def test_entrypoint_never_uses_pgrep_or_pkill(self):
+        text = ENTRYPOINT.read_text(encoding="utf-8")
+        assert "pgrep" not in text
+        assert "pkill" not in text
+
+    def test_entrypoint_does_not_trace_execution(self):
+        text = ENTRYPOINT.read_text(encoding="utf-8")
+        assert "set -x" not in text
+
+
+class TestEntrypointLifecycle:
+    def test_requires_hermes_cmd_env_var(self, tmp_path):
+        job_root = tmp_path / "job"
+        result = _run_entrypoint({
+            "RED_SHIRT_JOB_ROOT": str(job_root),
+        })
+        assert result.returncode != 0
+        assert "RED_SHIRT_HERMES_CMD" in result.stderr
+
+    def test_waits_foreground_and_propagates_hermes_exit_code(self, tmp_path):
+        hermes = _write_exec_script(tmp_path / "fake_hermes.sh",
+                                     "#!/usr/bin/env bash\nexit 7\n")
+        job_root = tmp_path / "job"
+        term_out = tmp_path / "terminal.json"
+        result = _run_entrypoint({
+            "RED_SHIRT_HERMES_CMD": str(hermes),
+            "RED_SHIRT_JOB_ROOT": str(job_root),
+            "RED_SHIRT_TERMINAL_OUTPUT": str(term_out),
+        })
+        assert result.returncode == 7, result.stderr
+        record = json.loads(term_out.read_text())
+        assert record["exit_code"] == 7
+        assert record["ok"] is False
+
+    def test_removes_job_local_state_but_preserves_persistent_home(self, tmp_path):
+        hermes = _write_exec_script(tmp_path / "fake_hermes.sh",
+                                     "#!/usr/bin/env bash\nexit 0\n")
+        job_root = tmp_path / "job"
+        job_root.mkdir()
+        (job_root / "ephemeral.marker").write_text("job-local")
+        home = tmp_path / "home"
+        home.mkdir()
+        (home / "persistent.marker").write_text("keep-me")
+        result = _run_entrypoint({
+            "RED_SHIRT_HERMES_CMD": str(hermes),
+            "RED_SHIRT_JOB_ROOT": str(job_root),
+            "RED_SHIRT_HOME": str(home),
+            "RED_SHIRT_TERMINAL_OUTPUT": str(tmp_path / "terminal.json"),
+        })
+        assert result.returncode == 0, result.stderr
+        assert not job_root.exists(), "job-local root must be removed on exit"
+        assert (home / "persistent.marker").is_file(), \
+            "persistent HERMES_HOME must never be touched"
+
+    def test_writes_ready_record_before_hermes_exits(self, tmp_path):
+        hermes = _write_exec_script(
+            tmp_path / "fake_hermes.sh",
+            "#!/usr/bin/env bash\nsleep 2\nexit 0\n",
+        )
+        ready_out = tmp_path / "ready.json"
+        job_root = tmp_path / "job"
+        proc = _start_entrypoint({
+            "RED_SHIRT_HERMES_CMD": str(hermes),
+            "RED_SHIRT_JOB_ROOT": str(job_root),
+            "RED_SHIRT_READY_OUTPUT": str(ready_out),
+            "RED_SHIRT_TERMINAL_OUTPUT": str(tmp_path / "terminal.json"),
+        })
+        try:
+            deadline = time.time() + 10
+            while time.time() < deadline and not ready_out.exists():
+                time.sleep(0.1)
+            assert ready_out.exists(), "ready record must be written while hermes is still running"
+            record = json.loads(ready_out.read_text())
+            assert record["ok"] is True
+        finally:
+            proc.wait(timeout=10)
+        assert proc.returncode == 0
+
+    def test_detects_required_support_child_death_and_tears_down(self, tmp_path):
+        """A required support child (e.g. the stand-in for tailscaled) dying
+        while Hermes is still running must be detected and must terminate
+        the whole supervised run rather than leaving an orphaned Hermes."""
+        marker = tmp_path / "hermes-still-running.marker"
+        hermes = _write_exec_script(
+            tmp_path / "fake_hermes.sh",
+            f"#!/usr/bin/env bash\n"
+            f"trap 'rm -f {shlex.quote(str(marker))}; exit 143' TERM\n"
+            f"touch {shlex.quote(str(marker))}\n"
+            f"sleep 60 >/dev/null 2>&1 & wait $!\n",
+        )
+        support = _write_exec_script(
+            tmp_path / "fake_support.sh",
+            "#!/usr/bin/env bash\nsleep 1\nexit 1\n",
+        )
+        job_root = tmp_path / "job"
+        result = _run_entrypoint({
+            "RED_SHIRT_HERMES_CMD": str(hermes),
+            "RED_SHIRT_SUPPORT_CMD": str(support),
+            "RED_SHIRT_JOB_ROOT": str(job_root),
+            "RED_SHIRT_TERM_TIMEOUT": "5",
+            "RED_SHIRT_TERMINAL_OUTPUT": str(tmp_path / "terminal.json"),
+        }, timeout=25)
+        assert result.returncode != 0, \
+            "a required support child dying must be treated as a failure"
+        assert not marker.exists(), \
+            "Hermes must have been torn down after the required child died"
+
+    def test_forwards_term_signal_to_owned_children(self, tmp_path):
+        marker = tmp_path / "got-term.marker"
+        hermes = _write_exec_script(
+            tmp_path / "fake_hermes.sh",
+            f"#!/usr/bin/env bash\n"
+            f"trap 'touch {shlex.quote(str(marker))}; exit 143' TERM\n"
+            f"sleep 60 >/dev/null 2>&1 & wait $!\n",
+        )
+        job_root = tmp_path / "job"
+        proc = _start_entrypoint({
+            "RED_SHIRT_HERMES_CMD": str(hermes),
+            "RED_SHIRT_JOB_ROOT": str(job_root),
+            "RED_SHIRT_TERMINAL_OUTPUT": str(tmp_path / "terminal.json"),
+        })
+        try:
+            time.sleep(1.0)
+            proc.send_signal(signal.SIGTERM)
+            proc.wait(timeout=15)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=5)
+        assert marker.exists(), "owned Hermes child must receive forwarded TERM"
+
+    def test_escalates_to_kill_after_bounded_timeout(self, tmp_path):
+        """A child that ignores TERM must be forcibly killed within the
+        configured bounded timeout, not left running indefinitely."""
+        survived_marker = tmp_path / "survived.marker"
+        hermes = _write_exec_script(
+            tmp_path / "fake_hermes.sh",
+            f"#!/usr/bin/env bash\n"
+            f"trap '' TERM\n"
+            f"touch {shlex.quote(str(survived_marker))}\n"
+            f"sleep 60 >/dev/null 2>&1 & wait $!\n",
+        )
+        job_root = tmp_path / "job"
+        started = time.time()
+        proc = _start_entrypoint({
+            "RED_SHIRT_HERMES_CMD": str(hermes),
+            "RED_SHIRT_JOB_ROOT": str(job_root),
+            "RED_SHIRT_TERM_TIMEOUT": "2",
+            "RED_SHIRT_TERMINAL_OUTPUT": str(tmp_path / "terminal.json"),
+        })
+        try:
+            deadline = time.time() + 10
+            while time.time() < deadline and not survived_marker.exists():
+                time.sleep(0.05)
+            assert survived_marker.exists()
+            proc.send_signal(signal.SIGTERM)
+            proc.wait(timeout=20)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=5)
+        elapsed = time.time() - started
+        assert elapsed < 15, f"KILL escalation took too long: {elapsed:.1f}s"
+
+    def test_no_secret_values_in_stdout_stderr_or_records(self, tmp_path):
+        secret = "unique-ambient-secret-value-12345"
+        hermes = _write_exec_script(tmp_path / "fake_hermes.sh",
+                                     "#!/usr/bin/env bash\nexit 0\n")
+        job_root = tmp_path / "job"
+        term_out = tmp_path / "terminal.json"
+        ready_out = tmp_path / "ready.json"
+        result = _run_entrypoint({
+            "RED_SHIRT_HERMES_CMD": str(hermes),
+            "RED_SHIRT_JOB_ROOT": str(job_root),
+            "RED_SHIRT_TERMINAL_OUTPUT": str(term_out),
+            "RED_SHIRT_READY_OUTPUT": str(ready_out),
+            "RED_SHIRT_TEST_AMBIENT_SECRET": secret,
+        })
+        assert secret not in result.stdout
+        assert secret not in result.stderr
+        assert secret not in term_out.read_text()
+        assert secret not in ready_out.read_text()
 
 
 if __name__ == "__main__":
