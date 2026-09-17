@@ -195,7 +195,7 @@ def _cli_authenticate() -> int:
     print("[alcf-auth] A URL will be printed — open it, log in with your ALCF/Globus")
     print("[alcf-auth] account, and paste the authorization code back here.\n")
     app = build_user_app(interactive=True)
-    app.login(auth_params=_auth_params())
+    app.login(auth_params=_auth_params(), force=True)
     # Verify each enabled service now resolves a token.
     ok = True
     for svc in services:
