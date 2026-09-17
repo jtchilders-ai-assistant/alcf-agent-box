@@ -185,7 +185,7 @@ def _service_token_present(service: str) -> bool:
 
 
 # --- CLI --------------------------------------------------------------------
-def _cli_authenticate() -> int:
+def _cli_authenticate(force: bool = False) -> int:
     services = ["inference"]
     if iri_enabled():
         services.append("iri")
@@ -195,7 +195,7 @@ def _cli_authenticate() -> int:
     print("[alcf-auth] A URL will be printed — open it, log in with your ALCF/Globus")
     print("[alcf-auth] account, and paste the authorization code back here.\n")
     app = build_user_app(interactive=True)
-    app.login(auth_params=_auth_params(), force=True)
+    app.login(auth_params=_auth_params(), force=force)
     # Verify each enabled service now resolves a token.
     ok = True
     for svc in services:
@@ -238,7 +238,9 @@ def main() -> int:
 
     p = argparse.ArgumentParser(description="ALCF combined Globus auth (one login for all services).")
     sub = p.add_subparsers(dest="action", required=True)
-    sub.add_parser("authenticate", help="run the ONE combined interactive login")
+    auth = sub.add_parser("authenticate", help="run the ONE combined interactive login")
+    auth.add_argument("--force", action="store_true",
+                      help="force a new Globus login and renew high-assurance session")
     sub.add_parser("check", help="report combined-store presence + enable flags (no network)")
     sub.add_parser("status", help="per-service token summary")
     g = sub.add_parser("get_access_token", help="print a fresh access token for one service")
@@ -247,7 +249,7 @@ def main() -> int:
     args = p.parse_args()
 
     if args.action == "authenticate":
-        return _cli_authenticate()
+        return _cli_authenticate(force=args.force)
     if args.action == "check":
         return _cli_check()
     if args.action == "status":

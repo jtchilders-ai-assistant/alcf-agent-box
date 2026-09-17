@@ -7,13 +7,14 @@ set -euo pipefail
 BASE_DIR="${RED_SHIRT_BASE_DIR:-$HOME/red-shirt-polaris}"
 SIF="${RED_SHIRT_SIF:-$BASE_DIR/red-shirt-polaris-current.sif}"
 ACTION="${1:-authenticate}"
+EXTRA_ARGS=("${@:2}")
 ENABLE_IRI="${ALCF_ENABLE_IRI:-0}"
 ENABLE_COMPUTE="${ALCF_ENABLE_GLOBUS_COMPUTE:-0}"
 
 case "$ACTION" in
   authenticate|check|status) ;;
   *)
-    printf 'Usage: %s [authenticate|check|status]\n' "$0" >&2
+    printf 'Usage: %s {authenticate [--force]|check|status}\n' "$0" >&2
     exit 2
     ;;
 esac
@@ -52,4 +53,4 @@ exec apptainer exec --cleanenv \
   "${AUTH_HELPER_BIND[@]}" \
   "$SIF" \
   /opt/hermes/.venv/bin/python \
-  "$AUTH_HELPER" "$ACTION"
+  "$AUTH_HELPER" "$ACTION" "${EXTRA_ARGS[@]}"

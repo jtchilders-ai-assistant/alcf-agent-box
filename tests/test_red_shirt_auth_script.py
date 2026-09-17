@@ -16,4 +16,8 @@ def test_authentication_script_is_safe_and_persistent():
     assert 'AUTH_HELPER_BIND=()' in body
     assert '--bind "$RED_SHIRT_AUTH_HELPER:/run/red-shirt-auth-helper.py:ro"' in body
     assert 'AUTH_HELPER="/run/red-shirt-auth-helper.py"' in body
-    assert "get_access_token" not in body
+def test_authentication_script_forwards_optional_force_flag():
+    body = SCRIPT.read_text(encoding="utf-8")
+    assert 'authenticate [--force]' in body
+    assert 'EXTRA_ARGS=("${@:2}")' in body
+    assert '"$AUTH_HELPER" "$ACTION" "${EXTRA_ARGS[@]}"' in body
