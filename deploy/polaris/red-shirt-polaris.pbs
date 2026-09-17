@@ -25,7 +25,8 @@ set -euo pipefail
 
 # ---------------------------------------------------------------------------
 # Layout (override any of these via a submit-time variable-list flag for
-# NON-secret path overrides only -- never for credential values).
+# NON-secret path overrides only -- never for credential values). Pure
+# string composition -- no I/O, cannot fail.
 # ---------------------------------------------------------------------------
 BASE_DIR="${BASE_DIR:-$HOME/red-shirt-polaris}"
 HERMES_HOME_DIR="${HERMES_HOME_DIR:-$BASE_DIR/home}"
@@ -35,14 +36,6 @@ INBOUND_A2A_FILE="${INBOUND_A2A_FILE:-$SECRETS_DIR/inbound-a2a.token}"
 OUTBOUND_A2A_FILE="${OUTBOUND_A2A_FILE:-$SECRETS_DIR/outbound-a2a.token}"
 CA_FILE="${CA_FILE:-$SECRETS_DIR/caddy-root.crt}"
 
-# Image pin is resolved the same fail-closed way as the SIF builder: no
-# default, ${VAR:?msg} aborts with an actionable message rather than
-# silently falling back to a stale or guessed artifact.
-RED_SHIRT_IMAGE="${RED_SHIRT_IMAGE:?RED_SHIRT_IMAGE is not set. Export the CI-published image reference used to build the SIF before submitting.}"
-RED_SHIRT_DIGEST="${RED_SHIRT_DIGEST:?RED_SHIRT_DIGEST is not set. Export the CI-published sha256 manifest digest before submitting.}"
-SIF_TAG="$(printf '%s' "$RED_SHIRT_IMAGE" | sed 's/.*://')"
-SIF="${SIF:-$BASE_DIR/red-shirt-polaris-${SIF_TAG}.sif}"
-
 JOB_ID="${PBS_JOBID:-manual-$$}"
 JOB_SHORT="${JOB_ID%%.*}"
 RUN_DIR="$BASE_DIR/runs/$JOB_ID"
@@ -50,11 +43,36 @@ SCRATCH_ROOT="/local/scratch/${USER}/red-shirt-run-${JOB_SHORT}"
 STATE_DIR="$SCRATCH_ROOT/state"
 READY_RECORD="$RUN_DIR/ready.json"
 TERMINAL_RECORD="$RUN_DIR/terminal.json"
-
-mkdir -p "$RUN_DIR" "$HERMES_HOME_DIR" "$STATE_DIR"
-chmod 700 "$RUN_DIR" "$STATE_DIR"
+APPTAINER_PID=""
 
 log() { printf '[red-shirt-pbs] %s\n' "$*"; }
+
+# ---------------------------------------------------------------------------
+# Create ONLY the persistent run directory and install the failure-recording
+# trap before anything that can fail: module loads, the image-pin gate,
+# credential validation, job-local scratch creation, and SIF checksum
+# verification. Every one of those gates runs AFTER this point specifically
+# so a failure at any of them still leaves a persistent terminal.json, not
+# just a startup that got all the way to launching Apptainer.
+# ---------------------------------------------------------------------------
+mkdir -p "$RUN_DIR"
+chmod 700 "$RUN_DIR"
+
+cleanup() {
+  rc=$?
+  set +e
+  if [ -n "$APPTAINER_PID" ] && kill -0 "$APPTAINER_PID" 2>/dev/null; then
+    kill -TERM "$APPTAINER_PID" 2>/dev/null
+    wait "$APPTAINER_PID" 2>/dev/null
+  fi
+  rm -rf -- "$SCRATCH_ROOT"
+  printf '{"exit_code": %s, "ok": %s, "pbs_job_id": "%s"}\n' \
+    "$rc" "$([ "$rc" -eq 0 ] && printf true || printf false)" "$JOB_ID" \
+    >"$TERMINAL_RECORD"
+  chmod 600 "$TERMINAL_RECORD" 2>/dev/null || true
+  exit "$rc"
+}
+trap cleanup EXIT INT TERM
 
 # ---------------------------------------------------------------------------
 # Modules (verified order: use, then base, then apptainer)
@@ -67,6 +85,28 @@ export HTTP_PROXY="http://proxy.alcf.anl.gov:3128"
 export HTTPS_PROXY="$HTTP_PROXY"
 export http_proxy="$HTTP_PROXY"
 export https_proxy="$HTTPS_PROXY"
+
+# ---------------------------------------------------------------------------
+# Image pin is resolved the same fail-closed way as the SIF builder in
+# intent -- no default, no silent fallback to a stale or guessed artifact --
+# but via explicit if/exit rather than bash's ${VAR:?msg} parameter
+# expansion. Under this launcher's `set -euo pipefail` + EXIT trap, ${VAR:?msg}
+# on an unset var does correctly abort the script, but the trap's `rc=$?`
+# read on entry then loses the failing status (observed: reads 0 in this
+# environment's bash), which corrupts terminal.json's exit_code/ok fields.
+# An explicit `if [ -z ... ]; then ...; exit 1; fi` calls `exit` itself, so
+# `$?` inside the trap is reliably the code passed to that exit call.
+# ---------------------------------------------------------------------------
+if [ -z "${RED_SHIRT_IMAGE:-}" ]; then
+  printf 'ERROR: RED_SHIRT_IMAGE is not set. Export the CI-published image reference used to build the SIF before submitting.\n' >&2
+  exit 1
+fi
+if [ -z "${RED_SHIRT_DIGEST:-}" ]; then
+  printf 'ERROR: RED_SHIRT_DIGEST is not set. Export the CI-published sha256 manifest digest before submitting.\n' >&2
+  exit 1
+fi
+SIF_TAG="$(printf '%s' "$RED_SHIRT_IMAGE" | sed 's/.*://')"
+SIF="${SIF:-$BASE_DIR/red-shirt-polaris-${SIF_TAG}.sif}"
 
 # ---------------------------------------------------------------------------
 # Credential validation -- METADATA ONLY. Contents are never read, echoed,
@@ -90,6 +130,9 @@ check_credential_file "$HEADSCALE_KEY_FILE" "Headscale join key"
 check_credential_file "$INBOUND_A2A_FILE" "inbound A2A token (wesley -> red-shirt-polaris)"
 check_credential_file "$OUTBOUND_A2A_FILE" "outbound A2A token (red-shirt-polaris -> wesley)"
 check_credential_file "$CA_FILE" "Headscale/Caddy root CA"
+
+mkdir -p "$HERMES_HOME_DIR" "$HERMES_HOME_DIR/runs/$JOB_ID" "$STATE_DIR"
+chmod 700 "$STATE_DIR"
 
 # ---------------------------------------------------------------------------
 # SIF checksum verification -- MUST happen before any execution. A qsub or
@@ -120,29 +163,6 @@ fi
   apptainer exec "$SIF" tailscale version || true
 } >"$RUN_DIR/metadata.txt"
 
-# ---------------------------------------------------------------------------
-# Signal-safe cleanup: forward TERM/INT to the running Apptainer process,
-# wait for it to exit, remove job-local (never persistent) scratch state,
-# and ALWAYS write a persistent terminal record -- even on failure.
-# ---------------------------------------------------------------------------
-APPTAINER_PID=""
-
-cleanup() {
-  rc=$?
-  set +e
-  if [ -n "$APPTAINER_PID" ] && kill -0 "$APPTAINER_PID" 2>/dev/null; then
-    kill -TERM "$APPTAINER_PID" 2>/dev/null
-    wait "$APPTAINER_PID" 2>/dev/null
-  fi
-  rm -rf -- "$SCRATCH_ROOT"
-  printf '{"exit_code": %s, "ok": %s, "pbs_job_id": "%s"}\n' \
-    "$rc" "$([ "$rc" -eq 0 ] && printf true || printf false)" "$JOB_ID" \
-    >"$TERMINAL_RECORD"
-  chmod 600 "$TERMINAL_RECORD" 2>/dev/null || true
-  exit "$rc"
-}
-trap cleanup EXIT INT TERM
-
 # APPTAINERENV_* carries only non-secret paths/config. Every credential is
 # passed as a mounted read-only FILE PATH under /mnt/secrets, never a
 # literal value, never argv, never a log line.
@@ -158,8 +178,6 @@ export APPTAINERENV_HTTP_PROXY="$HTTP_PROXY"
 export APPTAINERENV_HTTPS_PROXY="$HTTPS_PROXY"
 export APPTAINERENV_http_proxy="$http_proxy"
 export APPTAINERENV_https_proxy="$https_proxy"
-
-mkdir -p "$HERMES_HOME_DIR/runs/$JOB_ID"
 
 # Binds are restricted to destinations guaranteed present in the immutable
 # SIF: /opt/data (WORKDIR, owned by the hermes user) and /tmp (universally

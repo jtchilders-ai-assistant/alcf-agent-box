@@ -14,6 +14,7 @@ Run: pytest -q tests/test_red_shirt_polaris_launcher.py
 """
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -270,6 +271,69 @@ def test_pbs_writes_persistent_terminal_evidence():
 def test_pbs_records_readiness_path_for_the_in_container_probe():
     body = text(PBS)
     assert "READY_RECORD" in body or "APPTAINERENV_READY_RECORD" in body
+
+
+def test_pbs_writes_persistent_terminal_evidence_on_startup_failure(tmp_path, monkeypatch):
+    """Behavioral regression test: a launcher failure that happens before
+    Apptainer ever runs (missing RED_SHIRT_IMAGE here) must still leave a
+    persistent terminal.json under the run directory, because the cleanup
+    trap must be installed before any fallible startup gate.
+
+    The image-pin gate uses an explicit `if [ -z ... ]; then ...; exit 1; fi`
+    rather than bash's `${VAR:?msg}` parameter expansion specifically so this
+    holds on every bash the launcher might run under, including macOS's
+    frozen bash 3.2: under `set -e` + an EXIT trap, `${VAR:?msg}` on an unset
+    var aborts the script but a bare `rc=$?` read inside the trap then
+    observes `0` instead of the real failure code on bash 3.2 (verified
+    directly against `/bin/bash` on this host), which would have corrupted
+    terminal.json's exit_code/ok fields. Explicit `exit 1` fixes `$?` before
+    the trap fires, so this check is version-independent.
+    """
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    job_id = "test.0"
+
+    env = {
+        "HOME": str(fake_home),
+        "USER": "redshirt-test",
+        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+        "PBS_JOBID": job_id,
+        # Deliberately omit RED_SHIRT_IMAGE / RED_SHIRT_DIGEST so the
+        # launcher fails closed at the image-pin gate, well before any
+        # module load, credential check, or Apptainer invocation could
+        # succeed in this sandbox.
+    }
+    # `ml` is not available outside a real Polaris login/compute node --
+    # provide a no-op shim so the launcher gets past module loading and
+    # actually reaches (and fails at) the image-pin gate, exercising the
+    # trap's coverage of that gate specifically.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    ml_shim = bin_dir / "ml"
+    ml_shim.write_text("#!/bin/sh\nexit 0\n")
+    ml_shim.chmod(0o755)
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+
+    proc = subprocess.run(
+        ["bash", str(PBS)],
+        cwd=str(ROOT),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert proc.returncode != 0, "expected the launcher to fail closed without RED_SHIRT_IMAGE"
+
+    terminal_record = fake_home / "red-shirt-polaris" / "runs" / job_id / "terminal.json"
+    assert terminal_record.is_file(), (
+        "launcher must persist terminal.json even when it fails before "
+        f"Apptainer ever runs; stderr was:\n{proc.stderr}"
+    )
+    payload = json.loads(terminal_record.read_text())
+    assert payload["ok"] is False
+    assert payload["exit_code"] != 0
+    assert payload["pbs_job_id"] == job_id
 
 
 # ---------------------------------------------------------------------------
