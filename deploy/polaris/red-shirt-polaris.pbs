@@ -199,6 +199,7 @@ fi
 # APPTAINERENV_* carries only non-secret paths/config. Every credential is
 # passed as a mounted read-only FILE PATH under /mnt/secrets, never a
 # literal value, never argv, never a log line.
+export APPTAINERENV_HOME="/opt/data"
 export APPTAINERENV_HERMES_HOME="/opt/data"
 export APPTAINERENV_RED_SHIRT_HOME="/opt/data"
 export APPTAINERENV_RED_SHIRT_JOB_PARENT="/tmp"

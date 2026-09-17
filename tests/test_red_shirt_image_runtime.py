@@ -10,3 +10,10 @@ def test_red_shirt_image_installs_globus_sdk_into_hermes_interpreter():
         "uv pip install --python /opt/hermes/.venv/bin/python --no-cache globus-sdk"
         in body
     )
+
+
+def test_pbs_maps_container_home_to_persistent_hermes_home():
+    body = (ROOT / "deploy" / "polaris" / "red-shirt-polaris.pbs").read_text(
+        encoding="utf-8"
+    )
+    assert 'export APPTAINERENV_HOME="/opt/data"' in body
