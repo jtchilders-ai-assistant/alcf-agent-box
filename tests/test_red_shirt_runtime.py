@@ -1046,6 +1046,17 @@ class TestEntrypointStatic:
                                  capture_output=True, text=True)
         assert result.returncode == 0, result.stderr
 
+    def test_production_does_not_require_userspace_tailnet_hairpin(self):
+        """A userspace Tailscale node cannot reliably dial its own Serve IP.
+
+        Inbound reachability must be verified externally from Wesley; startup
+        must not fail while attempting a self-hairpin through the userspace
+        outbound proxy.
+        """
+        text = ENTRYPOINT.read_text(encoding="utf-8")
+        assert 'card --url \\"http://$TAILNET_IP:$A2A_PORT\\"' not in text
+        assert '"card_tailnet": "external_pending"' in text
+
     def test_entrypoint_uses_strict_mode_and_umask(self):
         text = ENTRYPOINT.read_text(encoding="utf-8")
         assert "set -euo pipefail" in text
@@ -1823,7 +1834,7 @@ class TestProductionPathOrdering:
             expected = [
                 "credentials_validated", "connect_proxy_reachable", "tailscaled_started",
                 "tailscale_up", "tailscale_serve", "config_rendered", "inference_smoke",
-                "hermes_started", "local_card", "tailnet_card", "ready_observed",
+                "hermes_started", "local_card", "ready_observed",
             ]
             assert observed == expected, (
                 f"startup order mismatch: observed={observed!r}, expected={expected!r}, "

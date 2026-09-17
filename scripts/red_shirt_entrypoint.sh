@@ -641,21 +641,17 @@ HERMES_PID=$!
 own_child "$HERMES_PID" "hermes-gateway"
 
 # ---------------------------------------------------------------------------
-# Gate 10: bounded-check the local Agent Card, then the same card fetched
-# through the userspace tailnet path (Serve -> our own tailnet IP), never by
-# curling our own loopback address directly for the second check.
+# Gate 10: bounded-check the local Agent Card. The external tailnet-path
+# check is intentionally performed by Wesley after READY: a userspace
+# tailscaled node cannot reliably hairpin through Tailscale Serve to its own
+# tailnet IP, so making that self-dial a startup gate produces a false failure.
 # ---------------------------------------------------------------------------
 if ! _wait_for "$CARD_TIMEOUT" \
     "\"$PYTHON_BIN\" \"$PROBE_PY\" card --url \"http://127.0.0.1:$A2A_PORT\" >/dev/null 2>&1"; then
   fail "local Agent Card never became ready on 127.0.0.1:$A2A_PORT"
 fi
 log "local Agent Card ready"
-
-if ! _wait_for "$CARD_TIMEOUT" \
-    "\"$PYTHON_BIN\" \"$PROBE_PY\" card --url \"http://$TAILNET_IP:$A2A_PORT\" --proxy \"http://127.0.0.1:$TS_OUTBOUND_HTTP_PORT\" --proxy-authority \"$TAILNET_IP:$A2A_PORT\" >/dev/null 2>&1"; then
-  fail "Agent Card never became reachable through the userspace tailnet path"
-fi
-log "tailnet-path Agent Card ready ($TAILNET_IP:$A2A_PORT)"
+log "tailnet-path Agent Card awaiting external Wesley probe ($TAILNET_IP:$A2A_PORT)"
 
 # ---------------------------------------------------------------------------
 # Gate 11: emit READY — non-secret evidence only.
@@ -673,7 +669,7 @@ payload = {
     "transport": "userspace-tailscale",
     "inference_smoke": "ok",
     "card_local": "ok",
-    "card_tailnet": "ok",
+    "card_tailnet": "external_pending",
 }
 path = "$READY_OUTPUT"
 d = os.path.dirname(path) or "."
