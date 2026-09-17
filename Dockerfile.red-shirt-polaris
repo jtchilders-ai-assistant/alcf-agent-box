@@ -37,6 +37,8 @@ RUN uv pip install --python /opt/hermes/.venv/bin/python --no-cache globus-sdk
 # image, so they do not require these paths to be present yet.
 COPY scripts/connect_proxy.py /opt/red-shirt-polaris/connect_proxy.py
 COPY scripts/alcf_combined_auth.py /opt/red-shirt-polaris/alcf_combined_auth.py
+COPY scripts/populate_models.py /opt/red-shirt-polaris/populate_models.py
+COPY scripts/resolve_context_length.py /opt/red-shirt-polaris/resolve_context_length.py
 COPY scripts/red_shirt_config.py /opt/red-shirt-polaris/red_shirt_config.py
 COPY scripts/red_shirt_probe.py /opt/red-shirt-polaris/red_shirt_probe.py
 COPY scripts/red_shirt_entrypoint.sh /opt/red-shirt-polaris/entrypoint.sh
