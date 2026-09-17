@@ -26,6 +26,10 @@ USER root
 COPY --from=tailscale-src /usr/local/bin/tailscale /usr/local/bin/tailscale
 COPY --from=tailscale-src /usr/local/bin/tailscaled /usr/local/bin/tailscaled
 
+# The ALCF token helper imports globus_sdk at job startup. The pinned Hermes
+# base does not ship it, so install it into the same interpreter Hermes uses.
+RUN uv pip install --python /opt/hermes/.venv/bin/python --no-cache globus-sdk
+
 # Later-task deliverables (entrypoint, config renderer, probes, SOUL, docs
 # snapshot) do not exist at this task. This COPY set matches the plan's file
 # map exactly; the build will fail once those paths exist but are wrong, and
