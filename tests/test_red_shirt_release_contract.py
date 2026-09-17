@@ -22,7 +22,7 @@ def test_pbs_exports_the_entrypoint_runtime_contract():
         'APPTAINERENV_RED_SHIRT_TOKEN_HELPER': '/opt/red-shirt-polaris/alcf_combined_auth.py',
         'APPTAINERENV_RED_SHIRT_HEADSCALE_URL': 'https://143.198.112.69.sslip.io',
         'APPTAINERENV_RED_SHIRT_PREFERRED_MODEL': 'openai/gpt-oss-120b',
-        'APPTAINERENV_RED_SHIRT_WESLEY_URL': 'http://100.64.0.2:8642/',
+        'APPTAINERENV_RED_SHIRT_WESLEY_URL': 'http://100.64.0.2:9900/',
         'APPTAINERENV_RED_SHIRT_READY_OUTPUT': f'/opt/data/runs/${{JOB_ID}}/ready.json',
         'APPTAINERENV_RED_SHIRT_TERMINAL_OUTPUT': f'/opt/data/runs/${{JOB_ID}}/terminal.json',
     }
