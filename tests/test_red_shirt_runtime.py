@@ -1066,8 +1066,11 @@ class TestEntrypointStatic:
         makes the already-running Hermes gateway fail TLS verification even
         though the preflight inference smoke (urllib) passed.
         """
-        text = PBS_LAUNCHER.read_text(encoding="utf-8")
-        assert "APPTAINERENV_SSL_CERT_FILE" not in text
+        pbs_text = PBS_LAUNCHER.read_text(encoding="utf-8")
+        entrypoint_text = ENTRYPOINT.read_text(encoding="utf-8")
+        assert "APPTAINERENV_SSL_CERT_FILE" not in pbs_text
+        assert 'APPTAINERENV_RED_SHIRT_HEADSCALE_CA_FILE="/mnt/secrets/caddy-root.crt"' in pbs_text
+        assert 'SSL_CERT_FILE="$HEADSCALE_CA_FILE"' in entrypoint_text
 
     def test_entrypoint_uses_strict_mode_and_umask(self):
         text = ENTRYPOINT.read_text(encoding="utf-8")
@@ -1510,6 +1513,7 @@ def _fake_runtime_env(tmp_path: Path, *, hermes_body: str = None,
     assert len(ts_socket.encode()) < 90, f"fake tailscaled socket path too long: {ts_socket!r}"
 
     headscale_key = _write_token(tmp_path, "fake-headscale-join-key-value", "headscale.key")
+    headscale_ca = _write_token(tmp_path, "fake-headscale-ca-certificate", "headscale-ca.crt")
     inbound_a2a = _write_token(tmp_path, "inbound-a2a-token-1234567890", "inbound.token")
     outbound_a2a = _write_token(tmp_path, "outbound-a2a-token-1234567890", "outbound.token")
 
@@ -1638,6 +1642,7 @@ def _fake_runtime_env(tmp_path: Path, *, hermes_body: str = None,
         "RED_SHIRT_HERMES_BIN": str(hermes),
         "RED_SHIRT_TS_SOCKET": ts_socket,
         "RED_SHIRT_HEADSCALE_KEY_FILE": str(headscale_key),
+        "RED_SHIRT_HEADSCALE_CA_FILE": str(headscale_ca),
         "RED_SHIRT_INBOUND_A2A_FILE": str(inbound_a2a),
         "RED_SHIRT_OUTBOUND_A2A_FILE": str(outbound_a2a),
         "RED_SHIRT_TOKEN_HELPER": str(token_helper),
