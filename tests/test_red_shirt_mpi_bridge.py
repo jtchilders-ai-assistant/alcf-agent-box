@@ -80,7 +80,7 @@ def test_acceptance_job_is_two_node_and_uses_exact_hostfile():
     assert re.search(r"--ppn\s+1\b", body)
     assert "module list" in body
     assert "ldd" in body
-    assert "apptainer exec" in body
+    assert re.search(r'"\$HOST_APPTAINER"\s+exec', body)
     assert "terminal.json" in body
 
 

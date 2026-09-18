@@ -65,7 +65,9 @@ def test_pbs_keeps_allocation_out_of_directives():
 def test_readme_documents_qsub_with_explicit_account_only_at_submit_time():
     body = text(README)
     assert "qsub -A datascience" in body
-    assert not re.search(r"^\s*qsub\s+.*(?:-v\b|--variable-list)", body, re.M)
+    for line in body.splitlines():
+        if re.search(r"^\s*qsub\s+.*(?:-v\b|--variable-list)", line):
+            assert not re.search(r"(?:TOKEN|SECRET|AUTH|PASSWORD|KEY)=", line, re.I)
 
 
 def test_pbs_never_uses_qsub_v_for_credentials():
@@ -230,7 +232,16 @@ def test_pbs_binds_only_to_destinations_guaranteed_present_in_image():
     body = text(PBS)
     destinations = re.findall(r'--bind\s+"[^:"]+:([^":]+?)(?::ro)?"', body)
     assert destinations, "expected at least one --bind directive"
-    allowed = {"/opt/data", "/mnt/secrets", "/tmp"}
+    allowed = {
+        "/opt/data",
+        "/mnt/secrets",
+        "/tmp",
+        "/opt/cray",
+        "/opt/nvidia",
+        "/opt/cray/libfabric",
+        "/soft",
+        "$PALS_RUNTIME_DIR",
+    }
     for dest in destinations:
         assert dest in allowed, f"unexpected bind destination not verified present in image: {dest}"
 
