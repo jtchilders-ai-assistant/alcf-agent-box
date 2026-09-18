@@ -479,6 +479,7 @@ log "connect-proxy ready on 127.0.0.1:$CONNECT_PROXY_PORT"
 # to reach the Headscale/ALCF proxy chain through the CONNECT proxy above.
 # ---------------------------------------------------------------------------
 http_proxy="http://127.0.0.1:$CONNECT_PROXY_PORT"
+SSL_CERT_FILE="$HEADSCALE_CA_FILE" \
 HTTP_PROXY="$http_proxy" HTTPS_PROXY="$http_proxy" \
 http_proxy="$http_proxy" https_proxy="$http_proxy" \
 "$TAILSCALED_BIN" \

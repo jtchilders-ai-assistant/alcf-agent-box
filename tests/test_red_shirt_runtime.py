@@ -1068,9 +1068,14 @@ class TestEntrypointStatic:
         """
         pbs_text = PBS_LAUNCHER.read_text(encoding="utf-8")
         entrypoint_text = ENTRYPOINT.read_text(encoding="utf-8")
-        assert "APPTAINERENV_SSL_CERT_FILE" not in pbs_text
+        assert 'APPTAINERENV_SSL_CERT_FILE' not in pbs_text
         assert 'APPTAINERENV_RED_SHIRT_HEADSCALE_CA_FILE="/mnt/secrets/caddy-root.crt"' in pbs_text
-        assert 'SSL_CERT_FILE="$HEADSCALE_CA_FILE"' in entrypoint_text
+        assert 'SSL_CERT_FILE="$HEADSCALE_CA_FILE" timeout "$TS_UP_TIMEOUT"' in entrypoint_text
+        tailscaled_launch = entrypoint_text[
+            entrypoint_text.index('"$TAILSCALED_BIN"') - 300:
+            entrypoint_text.index('"$TAILSCALED_BIN"') + 300
+        ]
+        assert 'SSL_CERT_FILE="$HEADSCALE_CA_FILE"' in tailscaled_launch
 
     def test_entrypoint_uses_strict_mode_and_umask(self):
         text = ENTRYPOINT.read_text(encoding="utf-8")
