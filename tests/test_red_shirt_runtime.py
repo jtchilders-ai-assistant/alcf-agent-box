@@ -33,6 +33,7 @@ import pytest
 REPO = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO / "scripts"
 PROBE = SCRIPTS / "red_shirt_probe.py"
+PBS_LAUNCHER = REPO / "deploy" / "polaris" / "red-shirt-polaris.pbs"
 
 
 def run_cli(args: list, env: dict | None = None) -> subprocess.CompletedProcess:
@@ -1056,6 +1057,17 @@ class TestEntrypointStatic:
         text = ENTRYPOINT.read_text(encoding="utf-8")
         assert 'card --url \\"http://$TAILNET_IP:$A2A_PORT\\"' not in text
         assert '"card_tailnet": "external_pending"' in text
+
+    def test_pbs_does_not_replace_public_ca_bundle_with_private_headscale_ca(self):
+        """Hermes must retain public WebPKI trust for ALCF inference.
+
+        The private Caddy root is needed by tailscale/headscale only. Exporting
+        it as SSL_CERT_FILE replaces certifi's public CA bundle for httpx and
+        makes the already-running Hermes gateway fail TLS verification even
+        though the preflight inference smoke (urllib) passed.
+        """
+        text = PBS_LAUNCHER.read_text(encoding="utf-8")
+        assert "APPTAINERENV_SSL_CERT_FILE" not in text
 
     def test_entrypoint_uses_strict_mode_and_umask(self):
         text = ENTRYPOINT.read_text(encoding="utf-8")
