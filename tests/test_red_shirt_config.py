@@ -84,6 +84,14 @@ def test_a2a_platform_can_call_configured_peer():
     assert "a2a" in doc["platform_toolsets"]["a2a"]
 
 
+def test_a2a_platform_can_execute_local_compute_tasks():
+    doc = yaml.safe_load(TEMPLATE.read_text(encoding="utf-8"))
+    enabled = doc["platform_toolsets"]["a2a"]
+    assert "terminal" in enabled
+    assert "file" in enabled
+    assert "code_execution" in enabled
+
+
 def _secrets(tmp_path: Path, *, inbound="a" * 20, outbound="b" * 20,
             headscale="c" * 10):
     inbound_path = _write(tmp_path / "inbound.token", inbound)

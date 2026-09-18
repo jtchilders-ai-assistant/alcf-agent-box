@@ -51,6 +51,11 @@ platform_toolsets:
   a2a:
     - hermes-a2a
     - a2a
+    # A2A is Red Shirt's only command channel, so authenticated peer requests
+    # must be able to inspect files and execute local compute-node workflows.
+    - terminal
+    - file
+    - code_execution
 
 # Standard A2A: inbound listener on loopback 9900, restricted to the
 # authenticated peer "wesley"; the renderer sets enabled/port on every
