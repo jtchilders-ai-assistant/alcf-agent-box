@@ -34,6 +34,8 @@ REPO = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO / "scripts"
 PROBE = SCRIPTS / "red_shirt_probe.py"
 PBS_LAUNCHER = REPO / "deploy" / "polaris" / "red-shirt-polaris.pbs"
+PINNED_A2A_TOOLS = REPO / "tests" / "fixtures" / "red_shirt_a2a_tools_v2026_9_14.py"
+PATCH_A2A_PROXY = SCRIPTS / "patch_hermes_a2a_proxy.py"
 
 
 def run_cli(args: list, env: dict | None = None) -> subprocess.CompletedProcess:
@@ -360,6 +362,45 @@ def _start(handler_cls) -> http.server.HTTPServer:
     t = threading.Thread(target=srv.serve_forever, daemon=True)
     t.start()
     return srv
+
+
+def _load_patched_a2a_http_functions(tmp_path: Path):
+    """Patch the exact source extracted from the deployed SIF, then load only
+    its stdlib HTTP seam so this regression test exercises real sockets
+    without importing the rest of Hermes on the host."""
+    assert PINNED_A2A_TOOLS.is_file(), "extract pinned tools.py before running this test"
+    target = tmp_path / "tools.py"
+    target.write_text(PINNED_A2A_TOOLS.read_text(encoding="utf-8"), encoding="utf-8")
+    subprocess.run([sys.executable, str(PATCH_A2A_PROXY), str(target)], check=True)
+    source = target.read_text(encoding="utf-8")
+    start = source.index("class _NoRedirect")
+    end = source.index("def _select_jsonrpc_interface")
+    ns = {"urllib": urllib, "json": json, "Optional": __import__("typing").Optional}
+    exec(source[start:end], ns)
+    return ns
+
+
+def test_pinned_hermes_a2a_http_seam_uses_exact_authority_proxy(tmp_path, card_server, forward_proxy):
+    ForwardingHTTPProxy.backend_addr = f"127.0.0.1:{card_server.server_port}"
+    funcs = _load_patched_a2a_http_functions(tmp_path)
+    fake_url = "http://100.64.0.2:9900/"
+    token = FakeA2AServer.expected_token
+    card = funcs["_fetch_card"](
+        fake_url, {"Authorization": f"Bearer {token}"}, 5,
+        _free_addr(forward_proxy), "100.64.0.2:9900",
+    )
+    assert isinstance(card, dict)
+    assert ForwardingHTTPProxy.received_authorities == ["100.64.0.2:9900"]
+
+
+def test_pinned_hermes_a2a_http_seam_rejects_wrong_authority_before_network(tmp_path, forward_proxy):
+    funcs = _load_patched_a2a_http_functions(tmp_path)
+    with pytest.raises(ValueError, match="does not match configured authority"):
+        funcs["_http_get_json"](
+            "http://arbitrary.invalid:9900/", {}, 5,
+            _free_addr(forward_proxy), "100.64.0.2:9900",
+        )
+    assert ForwardingHTTPProxy.received_authorities == []
 
 
 @pytest.fixture

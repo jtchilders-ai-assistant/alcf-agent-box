@@ -19,6 +19,12 @@ def test_red_shirt_image_copies_config_renderer_runtime_dependencies():
     assert "COPY scripts/resolve_context_length.py /opt/red-shirt-polaris/resolve_context_length.py" in body
 
 
+def test_red_shirt_image_patches_and_compiles_standard_a2a_proxy_support():
+    body = DOCKERFILE.read_text(encoding="utf-8")
+    assert "COPY scripts/patch_hermes_a2a_proxy.py" in body
+    assert "python -m py_compile /opt/hermes/plugins/platforms/a2a/tools.py" in body
+
+
 def test_pbs_maps_container_home_to_persistent_hermes_home():
     body = (ROOT / "deploy" / "polaris" / "red-shirt-polaris.pbs").read_text(
         encoding="utf-8"

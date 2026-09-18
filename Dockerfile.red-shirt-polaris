@@ -30,6 +30,15 @@ COPY --from=tailscale-src /usr/local/bin/tailscaled /usr/local/bin/tailscaled
 # base does not ship it, so install it into the same interpreter Hermes uses.
 RUN uv pip install --python /opt/hermes/.venv/bin/python --no-cache globus-sdk
 
+# The pinned standard A2A client uses urllib without proxy support. Polaris
+# userspace Tailscale has no kernel route, so add a fail-closed per-peer proxy
+# path: a proxy is usable only with an exact configured destination authority.
+COPY scripts/patch_hermes_a2a_proxy.py /tmp/patch_hermes_a2a_proxy.py
+RUN /opt/hermes/.venv/bin/python /tmp/patch_hermes_a2a_proxy.py \
+      /opt/hermes/plugins/platforms/a2a/tools.py \
+    && /opt/hermes/.venv/bin/python -m py_compile /opt/hermes/plugins/platforms/a2a/tools.py \
+    && rm /tmp/patch_hermes_a2a_proxy.py
+
 # Later-task deliverables (entrypoint, config renderer, probes, SOUL, docs
 # snapshot) do not exist at this task. This COPY set matches the plan's file
 # map exactly; the build will fail once those paths exist but are wrong, and

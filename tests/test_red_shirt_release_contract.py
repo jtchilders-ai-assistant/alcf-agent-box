@@ -72,3 +72,12 @@ def test_entrypoint_requires_and_renders_real_a2a_public_url():
     render_end = body.index('SELECTED_MODEL="$(awk', render_start)
     render = body[render_start:render_end]
     assert '--a2a-public-url "$A2A_PUBLIC_URL"' in render
+
+
+def test_entrypoint_routes_standard_a2a_client_through_userspace_proxy():
+    body = text(ROOT / 'scripts' / 'red_shirt_entrypoint.sh')
+    render_start = body.index('if ! "$PYTHON_BIN" "$CONFIG_PY" render')
+    render_end = body.index('SELECTED_MODEL="$(awk', render_start)
+    render = body[render_start:render_end]
+    assert '--wesley-proxy "http://127.0.0.1:$TS_OUTBOUND_HTTP_PORT"' in render
+    assert '--wesley-proxy-authority' in render

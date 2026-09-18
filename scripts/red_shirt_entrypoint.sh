@@ -567,6 +567,13 @@ if ! "$PYTHON_BIN" "$CONFIG_PY" render \
       --a2a-port "$A2A_PORT" \
       --a2a-public-url "$A2A_PUBLIC_URL" \
       --wesley-url "$WESLEY_URL" \
+      --wesley-proxy "http://127.0.0.1:$TS_OUTBOUND_HTTP_PORT" \
+      --wesley-proxy-authority "$("$PYTHON_BIN" - "$WESLEY_URL" <<'PYEOF'
+import sys
+from urllib.parse import urlsplit
+print(urlsplit(sys.argv[1]).netloc)
+PYEOF
+)" \
       >"$RENDER_OUT" 2>"$JOB_ROOT/render.err"; then
   fail "Hermes config render failed (no live/eligible model, or bad credentials); see $JOB_ROOT/render.err"
 fi

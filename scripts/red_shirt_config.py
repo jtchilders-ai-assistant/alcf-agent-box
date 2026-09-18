@@ -269,7 +269,8 @@ def _atomic_write_text(path: Path, content: str, mode: Optional[int] = None) -> 
 
 def _render_config_dict(template_doc: dict, *, model_id: str, base_url: str,
                         context_length: int, provider_name: str,
-                        max_tokens: int, a2a_port: int, wesley_url: str) -> dict:
+                        max_tokens: int, a2a_port: int, wesley_url: str,
+                        wesley_proxy: str = "", wesley_proxy_authority: str = "") -> dict:
     """Return a fully-rendered config dict (deep copy of the template, with
     every generated field set to a literal value except the two credential
     fields, which are LEFT as ``${VAR}`` references for Hermes to expand)."""
@@ -299,6 +300,9 @@ def _render_config_dict(template_doc: dict, *, model_id: str, base_url: str,
     wesley["url"] = wesley_url
     wesley["auth"] = {"type": "bearer", "token": "${A2A_OUTBOUND_WESLEY_TOKEN}"}
     wesley.setdefault("timeout", 120)
+    if wesley_proxy:
+        wesley["proxy"] = wesley_proxy
+        wesley["proxy_authority"] = wesley_proxy_authority
 
     cfg["custom_providers"] = [{
         "name": provider_name,
@@ -352,6 +356,8 @@ def render(args: argparse.Namespace) -> int:
         template_doc, model_id=model_id, base_url=base_url,
         context_length=context_length, provider_name=provider_name,
         max_tokens=max_tokens, a2a_port=args.a2a_port, wesley_url=args.wesley_url,
+        wesley_proxy=args.wesley_proxy,
+        wesley_proxy_authority=args.wesley_proxy_authority,
     )
 
     config_path = home / "config.yaml"
@@ -419,6 +425,8 @@ def build_parser() -> argparse.ArgumentParser:
     rn.add_argument("--a2a-port", type=int, default=9900)
     rn.add_argument("--a2a-public-url", default=DEFAULT_A2A_PUBLIC_URL)
     rn.add_argument("--wesley-url", default=DEFAULT_WESLEY_URL)
+    rn.add_argument("--wesley-proxy", default="")
+    rn.add_argument("--wesley-proxy-authority", default="")
 
     return p
 
