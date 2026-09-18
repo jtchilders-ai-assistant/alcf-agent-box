@@ -44,6 +44,14 @@ display:
   # No dashboard/TUI in the compute job — the only surface is A2A.
   interface: cli
 
+# Inbound A2A turns must also receive the standard A2A client tools. The A2A
+# client toolset is default-off, so relying on the platform's implicit bundle
+# leaves Red Shirt able to receive from Wesley but unable to call Wesley.
+platform_toolsets:
+  a2a:
+    - hermes-a2a
+    - a2a
+
 # Standard A2A: inbound listener on loopback 9900, restricted to the
 # authenticated peer "wesley"; the renderer sets enabled/port on every
 # render. Tailscale Serve (outside Hermes) forwards the tailnet-facing port

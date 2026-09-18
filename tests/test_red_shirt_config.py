@@ -79,6 +79,11 @@ def _fake_token_helper(tmp_path: Path, token: str = "fake-inference-access-token
     return helper
 
 
+def test_a2a_platform_can_call_configured_peer():
+    doc = yaml.safe_load(TEMPLATE.read_text(encoding="utf-8"))
+    assert "a2a" in doc["platform_toolsets"]["a2a"]
+
+
 def _secrets(tmp_path: Path, *, inbound="a" * 20, outbound="b" * 20,
             headscale="c" * 10):
     inbound_path = _write(tmp_path / "inbound.token", inbound)
