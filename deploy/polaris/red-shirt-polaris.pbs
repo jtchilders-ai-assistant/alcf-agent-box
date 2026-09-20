@@ -266,7 +266,7 @@ apptainer run --cleanenv \
   --bind "/opt/nvidia:/opt/nvidia:ro" \
   --bind "/opt/cray/libfabric:/opt/cray/libfabric:ro" \
   --bind "/soft:/soft:ro" \
-  --bind "$PALS_RUNTIME_DIR:$PALS_RUNTIME_DIR:ro" \
+  --bind "$PALS_RUNTIME_DIR:$PALS_RUNTIME_DIR" \
   "$SIF" \
   >"$RUN_DIR/stdout.log" 2>"$RUN_DIR/stderr.log" &
 APPTAINER_PID=$!

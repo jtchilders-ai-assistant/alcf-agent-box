@@ -26,6 +26,7 @@ def test_host_mpi_environment_helper_exists_and_is_valid_shell():
     assert "CRAY_LD_LIBRARY_PATH" in body
     assert "command -v mpiexec" in body
     assert "PBS_NODEFILE" in body
+    assert body.index("for candidate in /var/run/palsd /run/palsd") >= 0
     assert "/run/palsd" in body and "/var/run/palsd" in body
 
 
@@ -66,7 +67,8 @@ def test_launcher_binds_required_host_trees_read_only():
         '"/soft:/soft:ro"',
     ):
         assert binding in body
-    assert '"$PALS_RUNTIME_DIR:$PALS_RUNTIME_DIR:ro"' in body
+    assert '"$PALS_RUNTIME_DIR:$PALS_RUNTIME_DIR"' in body
+    assert '"$PALS_RUNTIME_DIR:$PALS_RUNTIME_DIR:ro"' not in body
 
 
 def test_acceptance_job_is_two_node_and_uses_exact_hostfile():
@@ -79,8 +81,23 @@ def test_acceptance_job_is_two_node_and_uses_exact_hostfile():
     assert re.search(r"(?:-n|--np)\s+2\b", body)
     assert re.search(r"--ppn\s+1\b", body)
     assert "module list" in body
+    assert "ml load cray-mpich" in body
+    assert body.index("ml load cray-mpich") < body.index('CC "$RUN_DIR/hello_mpi.c"')
+    assert "ml unload darshan" in body
+    assert body.index("ml unload darshan") < body.index('CC "$RUN_DIR/hello_mpi.c"')
+    runtime_source = body.index('source "$MPI_ENV_HELPER"', body.index('CC "$RUN_DIR/hello_mpi.c"'))
+    assert body.index('CC "$RUN_DIR/hello_mpi.c"') < runtime_source
+    assert body.index('printf \'pals_runtime_dir=%s', runtime_source) > runtime_source
     assert "ldd" in body
-    assert re.search(r'"\$HOST_APPTAINER"\s+exec', body)
+    assert '"/usr/lib64:/hostlib64:ro"' in body
+    assert "HOST_MPI_LD_LIBRARY_PATH=\"${HOST_MPI_LD_LIBRARY_PATH}:/hostlib64\"" in body
+    assert '"$PALS_RUNTIME_DIR:$PALS_RUNTIME_DIR"' in body
+    assert '"$PALS_RUNTIME_DIR:$PALS_RUNTIME_DIR:ro"' not in body
+    container_launch = body[body.index('"$HOST_MPIEXEC" --no-transfer'):]
+    assert re.search(r'"\$HOST_MPIEXEC"\s+--no-transfer\s+--hostfile\s+"\$PBS_NODEFILE"[\s\S]*?"\$HOST_APPTAINER"\s+exec', container_launch)
+    assert "--cleanenv" not in container_launch.split('>"$RUN_DIR/container.stdout"', 1)[0]
+    assert 'host.split(".", 1)[0]' in body
+    assert 'record["host"].split(".", 1)[0]' in body
     assert "terminal.json" in body
 
 

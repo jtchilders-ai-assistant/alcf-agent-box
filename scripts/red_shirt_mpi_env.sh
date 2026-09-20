@@ -26,7 +26,7 @@ if [ -z "${CRAY_LD_LIBRARY_PATH:-}" ]; then
 fi
 
 PALS_RUNTIME_DIR=""
-for candidate in /run/palsd /var/run/palsd; do
+for candidate in /var/run/palsd /run/palsd; do
   if [ -d "$candidate" ]; then
     PALS_RUNTIME_DIR="$candidate"
     break
