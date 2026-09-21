@@ -668,6 +668,55 @@ class TestCollect:
         assert kinds, "source_kind must be recorded"
 
 
+class TestPolarisLmodCollection:
+    """Production-shape Lmod regressions measured on Polaris."""
+
+    def test_collect_uses_lmod_cmd_sh_and_parses_stderr_lua(self, tmp_path):
+        """Polaris exposes module as a shell function; LMOD_CMD is the safe executable."""
+        fake_lmod = tmp_path / "lmod"
+        invocation_log = tmp_path / "invocations.jsonl"
+        fake_lmod.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, sys\n"
+            f"with open({str(invocation_log)!r}, 'a') as f:\n"
+            "    f.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+            "args = sys.argv[1:]\n"
+            "if args == ['sh', '--terse', 'avail']:\n"
+            "    sys.stderr.write('gcc/12.3.0\\n')\n"
+            "    raise SystemExit(0)\n"
+            "if args == ['sh', 'show', 'gcc/12.3.0']:\n"
+            "    sys.stderr.write('prepend_path(\"PATH\",\"/soft/gcc/12.3.0/bin\")\\n')\n"
+            "    sys.stderr.write('load(\"cray-mpich/8.1.30\")\\n')\n"
+            "    raise SystemExit(0)\n"
+            "raise SystemExit(2)\n"
+        )
+        fake_lmod.chmod(0o755)
+        env = os.environ.copy()
+        env.pop("RED_SHIRT_MODULE_CMD", None)
+        env["LMOD_CMD"] = str(fake_lmod)
+        env["INVOCATION_LOG"] = str(invocation_log)
+        db_path = tmp_path / "catalog.sqlite"
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPT), "collect",
+             "--output", str(db_path), "--system", "polaris",
+             "--source-id", "polaris-lmod", "--discover-modules",
+             "--module-limit", "1", "--command-timeout", "5"],
+            capture_output=True, text=True, env=env, check=False,
+        )
+        assert proc.returncode == 0, proc.stderr
+        invocations = [json.loads(line) for line in invocation_log.read_text().splitlines()]
+        assert ["sh", "--terse", "avail"] in invocations
+        assert ["sh", "show", "gcc/12.3.0"] in invocations
+        con = sqlite3.connect(str(db_path))
+        paths = {r[0] for r in con.execute("SELECT name FROM entities WHERE kind='path'")}
+        deps = set(con.execute(
+            "SELECT from_entity, to_entity FROM relations WHERE kind='prereq'"
+        ))
+        con.close()
+        assert "/soft/gcc/12.3.0/bin" in paths
+        assert ("gcc/12.3.0", "cray-mpich/8.1.30") in deps
+
+
 class TestCollectBounds:
     """Task 2 Step 2: bounded failure, timeout labeling, incomplete status."""
 

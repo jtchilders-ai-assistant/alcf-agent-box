@@ -514,13 +514,29 @@ _SAFE_MODULE_DIRECTIVE_RE = re.compile(
     r"^\s*(prepend-path|append-path|setenv|module-whatis|prereq|conflict|load|unload)"
     r"\s+(\S+)(?:\s+(.*))?$"
 )
+_SAFE_LMOD_LUA_DIRECTIVE_RE = re.compile(
+    r"^\s*(prepend_path|append_path|setenv|whatis|prereq|conflict|load|unload)"
+    r"\(\s*['\"]([^'\"]+)['\"](?:\s*,\s*['\"]([^'\"]*)['\"])?\s*\)\s*$"
+)
 _ALLOWED_ENV_VARS_FROM_SHOW = {"PATH", "LD_LIBRARY_PATH", "MANPATH", "PKG_CONFIG_PATH",
                                "CPATH", "INCLUDE", "LIBRARY_PATH", "LD_RUN_PATH"}
 _ELF_TAG_RE = re.compile(r"\((NEEDED|RPATH|RUNPATH)\)\s+(?:Shared library:|Library (?:rpath|runpath):)\s+\[(.+?)\]")
 
 
-def _module_cmd(env: Dict) -> str:
-    return env.get("RED_SHIRT_MODULE_CMD", "module")
+def _module_cmd_prefix(env: Dict) -> Tuple[List[str], bool]:
+    """Return safe argv prefix and whether Lmod data may be on stderr.
+
+    ``module`` is a shell function on Polaris and cannot be executed without
+    ``shell=True``. Lmod exposes its executable in ``LMOD_CMD``; shell mode
+    emits the modulefile representation to stderr.
+    """
+    override = env.get("RED_SHIRT_MODULE_CMD")
+    if override:
+        return [override], False
+    lmod_cmd = env.get("LMOD_CMD")
+    if lmod_cmd:
+        return [lmod_cmd, "sh"], True
+    return ["module"], False
 
 
 def _which_cmd(env: Dict) -> str:
@@ -531,8 +547,10 @@ def _readelf_cmd(env: Dict) -> str:
     return env.get("RED_SHIRT_READELF_CMD", "readelf")
 
 
-def _run_bounded(cmd: List[str], timeout: int, env: Dict) -> Tuple[int, str]:
-    """Run a command (no shell=True) with timeout. Returns (returncode, stdout_lines)."""
+def _run_bounded(
+    cmd: List[str], timeout: int, env: Dict, *, include_stderr: bool = False
+) -> Tuple[int, str]:
+    """Run argv without a shell and return bounded parsed output."""
     try:
         proc = subprocess.run(
             cmd,
@@ -541,7 +559,10 @@ def _run_bounded(cmd: List[str], timeout: int, env: Dict) -> Tuple[int, str]:
             timeout=timeout,
             env=env,
         )
-        return proc.returncode, proc.stdout
+        output = proc.stdout
+        if include_stderr:
+            output = output + ("\n" if output and proc.stderr else "") + proc.stderr
+        return proc.returncode, output
     except subprocess.TimeoutExpired:
         return 124, ""  # 124 = timeout exit code convention
     except FileNotFoundError:
@@ -592,12 +613,15 @@ def cmd_collect(args: argparse.Namespace) -> int:
     path_val = os.environ.get("PATH", "")
     if path_val:
         subprocess_env["PATH"] = path_val
-    # Preserve module command overrides for testing
-    for override_key in ("RED_SHIRT_MODULE_CMD", "RED_SHIRT_WHICH_CMD", "RED_SHIRT_READELF_CMD"):
+    # Preserve explicit tool overrides and Lmod's executable contract.
+    for override_key in (
+        "RED_SHIRT_MODULE_CMD", "RED_SHIRT_WHICH_CMD",
+        "RED_SHIRT_READELF_CMD", "LMOD_CMD",
+    ):
         if override_key in os.environ:
             subprocess_env[override_key] = os.environ[override_key]
 
-    module_cmd = _module_cmd(subprocess_env)
+    module_prefix, module_output_on_stderr = _module_cmd_prefix(subprocess_env)
     which_cmd = _which_cmd(subprocess_env)
     readelf_cmd = _readelf_cmd(subprocess_env)
 
@@ -633,8 +657,11 @@ def cmd_collect(args: argparse.Namespace) -> int:
 
     # --- Discover modules via module --terse avail (if requested) ---
     if getattr(args, "discover_modules", False):
-        avail_cmd = [module_cmd, "--terse", "avail"]
-        rc_av, stdout_av = _run_bounded(avail_cmd, timeout, subprocess_env)
+        avail_cmd = module_prefix + ["--terse", "avail"]
+        rc_av, stdout_av = _run_bounded(
+            avail_cmd, timeout, subprocess_env,
+            include_stderr=module_output_on_stderr,
+        )
         cmd_sha_av = _sha256_cmd(avail_cmd)
         now_av = _utc_now()
         con.execute(
@@ -704,8 +731,11 @@ def cmd_collect(args: argparse.Namespace) -> int:
             pass
 
         # Run module show
-        show_cmd = [module_cmd, "show", mod_spec]
-        rc, stdout = _run_bounded(show_cmd, timeout, subprocess_env)
+        show_cmd = module_prefix + ["show", mod_spec]
+        rc, stdout = _run_bounded(
+            show_cmd, timeout, subprocess_env,
+            include_stderr=module_output_on_stderr,
+        )
         cmd_sha = _sha256_cmd(show_cmd)
         src_kind = "module_show"
 
@@ -728,9 +758,14 @@ def cmd_collect(args: argparse.Namespace) -> int:
         # Parse module show output — only allowlisted directives
         for line in stdout.splitlines():
             m = _SAFE_MODULE_DIRECTIVE_RE.match(line)
-            if not m:
-                continue
-            directive, field, rest = m.group(1), m.group(2), m.group(3) or ""
+            if m:
+                directive, field, rest = m.group(1), m.group(2), m.group(3) or ""
+            else:
+                m = _SAFE_LMOD_LUA_DIRECTIVE_RE.match(line)
+                if not m:
+                    continue
+                directive, field, rest = m.group(1), m.group(2), m.group(3) or ""
+                directive = directive.replace("_", "-")
             rest = rest.strip()
 
             if directive in ("prepend-path", "append-path"):
@@ -1362,6 +1397,10 @@ def cmd_observe(args: argparse.Namespace) -> int:
                 "INSERT INTO metadata (key, value) VALUES (?, ?)",
                 ("site_snapshot_id", site_snapshot_id),
             )
+            ov_con.execute(
+                "INSERT INTO metadata (key, value) VALUES (?, ?)",
+                ("site_sha256", actual_site_digest),
+            )
             ov_con.commit()
             ov_con.close()
         except Exception as e:
@@ -1382,12 +1421,15 @@ def cmd_observe(args: argparse.Namespace) -> int:
         stored_site_snap_row = ov_con.execute(
             "SELECT value FROM metadata WHERE key='site_snapshot_id'"
         ).fetchone()
+        stored_site_digest_row = ov_con.execute(
+            "SELECT value FROM metadata WHERE key='site_sha256'"
+        ).fetchone()
         stored_site_snap_id = stored_site_snap_row["value"] if stored_site_snap_row else None
-        if stored_site_snap_id and stored_site_snap_id != site_snapshot_id:
+        stored_site_digest = stored_site_digest_row["value"] if stored_site_digest_row else None
+        if stored_site_snap_id != site_snapshot_id or stored_site_digest != actual_site_digest:
             ov_con.close()
             print(
-                f"error: overlay was created for site_snapshot_id={stored_site_snap_id!r},"
-                f" but current site has snapshot_id={site_snapshot_id!r}",
+                "error: overlay site snapshot identity or digest does not match current site",
                 file=sys.stderr,
             )
             return 1
