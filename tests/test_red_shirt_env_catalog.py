@@ -2015,6 +2015,40 @@ class TestNoProductionTestHelperCommands:
         assert row is not None and row[0] == "prereq"
 
 
+class TestFinalReviewRegressions:
+    def test_finalize_marks_never_collected_catalog_incomplete(self, tmp_path):
+        db_path = make_catalog(tmp_path)
+        proc = run_cli("finalize", "--db", str(db_path))
+        assert proc.returncode == 0, proc.stderr
+        payload = json.loads(run_cli("status", "--db", str(db_path)).stdout)
+        assert payload["collection_status"] == "incomplete"
+
+    def test_overlay_search_treats_like_metacharacters_literally(self, tmp_path, finalized_catalog):
+        attempt_root = tmp_path / "attempt-like"
+        attempt_root.mkdir()
+        evidence = attempt_root / "evidence.txt"
+        evidence.write_text("evidence")
+        import hashlib as _hashlib
+        digest = _hashlib.sha256(evidence.read_bytes()).hexdigest()
+        overlay = attempt_root / "overlay.sqlite"
+        for subject in ("literal%subject", "literalXsubject"):
+            payload = json.dumps({
+                "subject": subject, "kind": "probe", "claim": "claim",
+                "evidence_level": "runtime_observed", "outcome": "success",
+                "evidence_path": str(evidence), "evidence_sha256": digest,
+                "command_exit_code": 0, "env_profile_id": "profile-like",
+            })
+            proc = run_cli("observe", "--overlay", str(overlay), "--site", str(finalized_catalog),
+                           "--input", payload, "--attempt-root", str(attempt_root))
+            assert proc.returncode == 0, proc.stderr
+        result = run_cli("search", "--db", str(finalized_catalog), "--overlay", str(overlay),
+                         "--query", "%", "--limit", "10")
+        assert result.returncode == 0, result.stderr
+        subjects = [r["name"] for r in json.loads(result.stdout)["results"]]
+        assert "literal%subject" in subjects
+        assert "literalXsubject" not in subjects
+
+
 class TestAdversarialGapRegressions:
     def test_explicit_secret_like_module_fails_collection_closed(self, tmp_path):
         db_path = tmp_path / "catalog.sqlite"

@@ -276,6 +276,7 @@ export APPTAINERENV_RED_SHIRT_ENV_CATALOG_OVERLAY="$ENV_OVERLAY"
   --bind "$HERMES_HOME_DIR:/opt/data" --bind "$ATTEMPT:$ATTEMPT" \
   --bind "$BASE_DIR:$BASE_DIR" \
   --bind "$ENV_DIR/site.sqlite:/environment/site.sqlite:ro" \
+  --bind "$ENV_DIR/site.sqlite.sha256:/environment/site.sqlite.sha256:ro" \
   "$SIF" python3 /opt/red-shirt-polaris/red_shirt_campaign.py \
     --task-root "$TASK" --runtime-root "$RUNTIME" \
     --facts-json "$RUNTIME/facts.json" \

@@ -322,17 +322,26 @@ def cmd_finalize(args: argparse.Namespace) -> int:
             print(f"error: integrity check failed: {ic[0]}", file=sys.stderr)
             return 1
 
-        fts_ic = con.execute("INSERT INTO entity_fts(entity_fts) VALUES('integrity-check')").fetchone()
+        qc = con.execute("PRAGMA quick_check").fetchone()
+        if qc and qc[0] != "ok":
+            con.close()
+            print(f"error: quick check failed: {qc[0]}", file=sys.stderr)
+            return 1
+
+        con.execute("INSERT INTO entity_fts(entity_fts) VALUES('integrity-check')")
 
         now = _utc_now()
         con.execute(
             "UPDATE snapshots SET status='complete', finalized_at=?",
             (now,),
         )
-        # Mark collection_status complete if still pending
+        # A never-collected or interrupted snapshot must not become complete.
+        entity_count = con.execute("SELECT COUNT(*) FROM entities").fetchone()[0]
+        pending_status = "complete" if entity_count > 0 else "incomplete"
         con.execute(
-            "UPDATE snapshots SET collection_status='complete'"
+            "UPDATE snapshots SET collection_status=?"
             " WHERE collection_status='pending'",
+            (pending_status,),
         )
         con.commit()
         con.close()
@@ -971,7 +980,8 @@ def cmd_search(args: argparse.Namespace) -> int:
     collection_status = snap["collection_status"] if snap else "unknown"
 
     query = getattr(args, "query", "") or ""
-    # Escape FTS5 special chars — use parameterized query
+    # Treat user input as an FTS phrase rather than FTS query syntax.
+    fts_query = '"' + query.replace('"', '""') + '"'
     rows = con.execute(
         "SELECT e.id, e.name, e.version, e.kind, e.evidence_level, e.source_kind"
         " FROM entity_fts f"
@@ -979,7 +989,7 @@ def cmd_search(args: argparse.Namespace) -> int:
         " WHERE entity_fts MATCH ?"
         " ORDER BY e.name, e.version, e.kind"
         " LIMIT ?",
-        (query, limit),
+        (fts_query, limit),
     ).fetchall()
 
     results = []
@@ -1033,15 +1043,15 @@ def _merge_overlay_search(results: List, overlay_path: Path, query: str, site_db
     if not overlay_path.exists():
         return None, None
     try:
-        ov_con = sqlite3.connect(str(overlay_path))
-        ov_con.row_factory = sqlite3.Row
+        ov_con = _open_ro(overlay_path)
         snap_row = ov_con.execute("SELECT id FROM snapshots LIMIT 1").fetchone()
         overlay_snap_id = snap_row["id"] if snap_row else None
+        escaped_query = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         rows = ov_con.execute(
             "SELECT subject, kind, outcome, evidence_level, env_profile_id FROM observations"
-            " WHERE subject LIKE ?"
+            " WHERE subject LIKE ? ESCAPE '\\'"
             " ORDER BY subject, kind",
-            (f"%{query}%",),
+            (f"%{escaped_query}%",),
         ).fetchall()
         for row in rows:
             results.append({

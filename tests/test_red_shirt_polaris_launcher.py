@@ -609,6 +609,14 @@ def test_campaign_facts_use_container_paths_and_real_catalog_status():
     assert '"snapshot_id"' in body
 
 
+def test_main_agent_exec_binds_catalog_sidecar_read_only():
+    body = text(CAMPAIGN_PBS)
+    assert re.search(
+        r'--bind\s+"\$ENV_DIR/site\.sqlite\.sha256:/environment/site\.sqlite\.sha256:ro"',
+        body,
+    ), "observe requires the verified site sidecar inside the running container"
+
+
 # ---------------------------------------------------------------------------
 # Task 4: Environment-catalog image and campaign integration
 # ---------------------------------------------------------------------------
