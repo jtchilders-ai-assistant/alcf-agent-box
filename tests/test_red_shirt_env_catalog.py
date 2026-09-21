@@ -677,10 +677,12 @@ class TestPolarisLmodCollection:
         invocation_log = tmp_path / "invocations.jsonl"
         fake_lmod.write_text(
             "#!/usr/bin/env python3\n"
-            "import json, sys\n"
+            "import json, os, sys\n"
             f"with open({str(invocation_log)!r}, 'a') as f:\n"
             "    f.write(json.dumps(sys.argv[1:]) + '\\n')\n"
             "args = sys.argv[1:]\n"
+            "if not os.environ.get('MODULEPATH'):\n"
+            "    raise SystemExit(3)\n"
             "if args == ['sh', '--terse', 'avail']:\n"
             "    sys.stderr.write('gcc/12.3.0\\n')\n"
             "    raise SystemExit(0)\n"
@@ -694,6 +696,7 @@ class TestPolarisLmodCollection:
         env = os.environ.copy()
         env.pop("RED_SHIRT_MODULE_CMD", None)
         env["LMOD_CMD"] = str(fake_lmod)
+        env["MODULEPATH"] = "/soft/modulefiles"
         env["INVOCATION_LOG"] = str(invocation_log)
         db_path = tmp_path / "catalog.sqlite"
         proc = subprocess.run(

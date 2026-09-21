@@ -608,11 +608,13 @@ def cmd_collect(args: argparse.Namespace) -> int:
     con = _open_rw(output)
     snapshot_id = _get_snapshot_id(con)
 
-    # Build env for subprocesses (pass through PATH only — no raw env dump)
-    subprocess_env = {}
-    path_val = os.environ.get("PATH", "")
-    if path_val:
-        subprocess_env["PATH"] = path_val
+    # Preserve only the environment needed to locate tools and the Lmod
+    # module tree; never serialize either value into the catalog.
+    subprocess_env: Dict[str, str] = {}
+    for safe_env_key in ("PATH", "MODULEPATH"):
+        safe_env_value = os.environ.get(safe_env_key, "")
+        if safe_env_value:
+            subprocess_env[safe_env_key] = safe_env_value
     # Preserve explicit tool overrides and Lmod's executable contract.
     for override_key in (
         "RED_SHIRT_MODULE_CMD", "RED_SHIRT_WHICH_CMD",
