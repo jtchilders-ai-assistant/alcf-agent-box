@@ -40,7 +40,14 @@ OUT_DIR="${OUT_DIR:-$HOME/red-shirt-polaris}"
 SIF_TAG="$(printf '%s' "$RED_SHIRT_IMAGE" | sed 's/.*://')"
 SIF="${SIF:-$OUT_DIR/red-shirt-polaris-${SIF_TAG}.sif}"
 JOB_TAG="${PBS_JOBID:-manual-$$}"
-SCRATCH_ROOT="/local/scratch/${USER}/red-shirt-build-${JOB_TAG%%.*}"
+LOCAL_SCRATCH="/local/scratch/${USER}"
+if mkdir -p "$LOCAL_SCRATCH" 2>/dev/null && [ -w "$LOCAL_SCRATCH" ]; then
+  SCRATCH_BASE="$LOCAL_SCRATCH"
+else
+  SCRATCH_BASE="$OUT_DIR/.build-scratch"
+  mkdir -p "$SCRATCH_BASE"
+fi
+SCRATCH_ROOT="$SCRATCH_BASE/red-shirt-build-${JOB_TAG%%.*}"
 
 cleanup_scratch() {
   rm -rf -- "$SCRATCH_ROOT"
