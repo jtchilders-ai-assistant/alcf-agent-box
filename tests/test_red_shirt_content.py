@@ -256,6 +256,27 @@ def test_soul_is_non_roleplay_and_covers_full_operating_contract():
         assert phrase in lowered, f"SOUL.md missing required operating phrase: {phrase}"
 
 
+def test_soul_covers_resident_execution_and_evidence_contract():
+    soul = (ROOT / "config/red-shirt-polaris/SOUL.md").read_text()
+    lowered = soul.lower()
+    for phrase in (
+        "packaging boundary",
+        "dependency discovery and installation",
+        "build, tests,",
+        "execution, and scientific analysis",
+        "launch acknowledgement",
+        "terminal result",
+        "contradictory evidence",
+        "requested configuration",
+        "detected configuration",
+        "compiled and linked",
+        "runtime evidence",
+        "terminal checkpoint",
+        "time exhaustion",
+    ):
+        assert phrase in lowered, f"SOUL.md missing resident evidence rule: {phrase}"
+
+
 def test_doc_index_has_provenance_for_every_snapshot():
     index = (ROOT / "docs/polaris-snapshot/README.md").read_text()
     docs = list((ROOT / "docs/polaris-snapshot").glob("*/*.md"))
