@@ -9,15 +9,17 @@ Commands:
   init                 Create a new site catalog (writable, status=open).
   finalize             Run integrity checks, chmod 0444, write .sha256 sidecar.
   verify               Check sidecar digest, schema, integrity, complete status.
-  collect              Bounded host collection of module/path/elf provenance.
+  collect              Bounded host collection of module/path/elf/exe provenance.
   search               FTS5 search over entities.
   show                 Show a single entity with evidence level.
   dependencies         Directed dependency closure from a named entity.
   reverse-dependencies Reverse dependency closure.
   status               Print snapshot metadata as JSON.
   observe              Record a structured observation into a writable overlay.
-  insert-test-entity   Test helper: insert a safe entity (used by tests only).
-  insert-test-relation Test helper: insert a relation (used by tests only).
+
+Test helpers (Python import only, NOT CLI commands):
+  fixture_insert_entity(db_path, name, version, kind)
+  fixture_insert_relation(db_path, from_entity, to_entity, kind)
 """
 
 from __future__ import annotations
@@ -335,14 +337,40 @@ def cmd_finalize(args: argparse.Namespace) -> int:
         con.commit()
         con.close()
     except Exception as e:
+        con.rollback()
         con.close()
         print(f"error: finalize failed: {e}", file=sys.stderr)
         return 1
 
-    # Write SHA-256 sidecar
+    # Write SHA-256 sidecar atomically.
+    # If sidecar publish fails, restore the snapshot to status=open so the
+    # operation remains retryable (I-5 / finalize atomicity guarantee).
     digest = _sha256_file(db_path)
     sidecar = Path(str(db_path) + ".sha256")
-    sidecar.write_text(f"{digest}  {db_path.name}\n")
+    sidecar_content = f"{digest}  {db_path.name}\n"
+    tmp_fd, tmp_sidecar_name = tempfile.mkstemp(
+        suffix=".tmp.sha256", dir=str(sidecar.parent)
+    )
+    try:
+        os.write(tmp_fd, sidecar_content.encode())
+        os.close(tmp_fd)
+        os.replace(tmp_sidecar_name, str(sidecar))
+    except Exception as sidecar_exc:
+        # Sidecar publish failed — restore the snapshot to status=open so that
+        # the caller can retry finalize without a corrupt/incomplete state.
+        try:
+            os.close(tmp_fd)
+        except OSError:
+            pass
+        Path(tmp_sidecar_name).unlink(missing_ok=True)
+        try:
+            undo_con = _open_rw(db_path)
+            undo_con.execute("UPDATE snapshots SET status='open', finalized_at=NULL")
+            undo_con.commit()
+            undo_con.close()
+        except Exception:
+            pass  # Best-effort undo; the caller sees the OSError regardless
+        raise sidecar_exc
 
     # Chmod both to 0444
     os.chmod(str(db_path), 0o444)
@@ -417,90 +445,65 @@ def cmd_verify(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Command: insert-test-entity (test helper)
+# Fixture helpers (importable by tests; NOT CLI commands)
 # ---------------------------------------------------------------------------
 
-def cmd_insert_test_entity(args: argparse.Namespace) -> int:
-    db_path = Path(args.db)
-    try:
-        metadata = json.loads(args.metadata)
-    except (json.JSONDecodeError, AttributeError) as e:
-        print(f"error: invalid metadata JSON: {e}", file=sys.stderr)
-        return 1
-
-    key = metadata.get("key", "")
-    value = metadata.get("value", "")
-
-    # Secret firewall — validate key and value, and nested content
-    try:
-        _validate_string(key, str(value))
-        if isinstance(value, dict):
-            _validate_metadata(value)
-        elif isinstance(value, str):
-            # Also check if the value is JSON containing secrets
-            try:
-                nested = json.loads(value)
-                if isinstance(nested, dict):
-                    _validate_metadata(nested)
-            except json.JSONDecodeError:
-                pass  # not JSON, already checked as plain string above
-    except ValueError as e:
-        print(f"error: {e}", file=sys.stderr)
-        return 1
-
-    con = _open_rw(db_path)
+def fixture_insert_entity(
+    db_path: Path,
+    name: str,
+    version: Optional[str],
+    kind: str,
+    active: int = 0,
+    evidence_level: str = "declared",
+    source_kind: Optional[str] = None,
+) -> None:
+    """Insert a test entity into an open (writable) catalog. For test use only."""
+    con = _open_rw(Path(db_path))
     try:
         snapshot_id = _get_snapshot_id(con)
         now = _utc_now()
-
-        # Derive name/version from value
-        val_str = str(value)
-        if "/" in val_str:
-            parts = val_str.split("/", 1)
-            name, version = parts[0], parts[1]
-        else:
-            name, version = val_str, None
-
         con.execute(
             "INSERT OR IGNORE INTO entities"
             " (snapshot_id, name, version, kind, active, evidence_level, source_kind, created_at)"
-            " VALUES (?, ?, ?, ?, 0, 'declared', ?, ?)",
-            (snapshot_id, name, version, key, None, now),
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (snapshot_id, name, version, kind, active, evidence_level, source_kind, now),
         )
         con.commit()
-    except Exception as e:
+    except Exception:
         con.rollback()
+        raise
+    finally:
         con.close()
-        print(f"error: {e}", file=sys.stderr)
-        return 1
-
-    con.close()
-    return 0
 
 
-# ---------------------------------------------------------------------------
-# Command: insert-test-relation (test helper)
-# ---------------------------------------------------------------------------
-
-def cmd_insert_test_relation(args: argparse.Namespace) -> int:
-    db_path = Path(args.db)
-    con = _open_rw(db_path)
+def fixture_insert_relation(
+    db_path: Path,
+    from_entity: str,
+    to_entity: str,
+    kind: str,
+) -> None:
+    """Insert a test relation into an open (writable) catalog. For test use only."""
+    con = _open_rw(Path(db_path))
     try:
         snapshot_id = _get_snapshot_id(con)
         now = _utc_now()
         con.execute(
             "INSERT INTO relations (snapshot_id, from_entity, to_entity, kind, created_at)"
             " VALUES (?, ?, ?, ?, ?)",
-            (snapshot_id, args.from_entity, args.to_entity, args.kind, now),
+            (snapshot_id, from_entity, to_entity, kind, now),
         )
         con.commit()
-    except Exception as e:
+    except Exception:
         con.rollback()
+        raise
+    finally:
         con.close()
-        print(f"error: {e}", file=sys.stderr)
-        return 1
-    con.close()
-    return 0
+
+
+# ---------------------------------------------------------------------------
+# Command: insert-test-entity (REMOVED — use fixture_insert_entity() directly)
+# Command: insert-test-relation (REMOVED — use fixture_insert_relation() directly)
+# ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------
@@ -550,7 +553,8 @@ def _sha256_str(s: str) -> str:
 
 
 def _sha256_cmd(cmd: List[str]) -> str:
-    return _sha256_str(" ".join(cmd))
+    # Use compact JSON for a canonical, unambiguous representation of the argv list
+    return _sha256_str(json.dumps(cmd, separators=(",", ":")))
 
 
 def cmd_collect(args: argparse.Namespace) -> int:
@@ -564,6 +568,8 @@ def cmd_collect(args: argparse.Namespace) -> int:
         if args.module_limit <= 0:
             print("error: --module-limit must be positive", file=sys.stderr)
             return 1
+
+    module_limit = args.module_limit  # None means unlimited
 
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -625,15 +631,61 @@ def cmd_collect(args: argparse.Namespace) -> int:
         except ValueError:
             pass  # LOADEDMODULES itself was secret-like — skip
 
+    # --- Discover modules via module --terse avail (if requested) ---
+    if getattr(args, "discover_modules", False):
+        avail_cmd = [module_cmd, "--terse", "avail"]
+        rc_av, stdout_av = _run_bounded(avail_cmd, timeout, subprocess_env)
+        cmd_sha_av = _sha256_cmd(avail_cmd)
+        now_av = _utc_now()
+        con.execute(
+            "INSERT INTO observations"
+            " (snapshot_id, subject, kind, claim, evidence_level, outcome,"
+            " provenance_sha256, command_exit_code, source_kind, created_at)"
+            " VALUES (?, ?, 'probe', ?, 'declared', ?, ?, ?, 'module_avail', ?)",
+            (snapshot_id, "module_avail",
+             json.dumps(avail_cmd),
+             "success" if rc_av == 0 else "failure",
+             cmd_sha_av, rc_av, now_av),
+        )
+        if rc_av == 0:
+            discovered = []
+            for line in stdout_av.splitlines():
+                line = line.strip()
+                if not line or line.startswith("-") or line.startswith("/"):
+                    continue
+                try:
+                    _validate_string("module_spec", line)
+                    discovered.append(line)
+                except ValueError:
+                    pass
+            # Apply module_limit to DISCOVERED modules only — explicit --module
+            # entries are never dropped regardless of module_limit.
+            explicit_set = set(args.module) if args.module else set()
+            extra_discovered = [d for d in discovered if d not in explicit_set]
+            if module_limit is not None:
+                extra_discovered = extra_discovered[:module_limit]
+            # Explicit modules first, then discovered extras (order matters for provenance)
+            requested_modules_from_discover = list(args.module) + extra_discovered if args.module else extra_discovered
+        else:
+            collection_incomplete = True
+            requested_modules_from_discover = list(args.module) if args.module else []
+    else:
+        requested_modules_from_discover = list(args.module) if args.module else []
+
     # --- Collect requested modules ---
-    requested_modules = list(args.module) if args.module else []
+    requested_modules = requested_modules_from_discover
 
     for mod_spec in requested_modules:
         try:
             _validate_string("module_spec", mod_spec)
+            # Also reject module names whose leading component matches a secret key pattern
+            mod_name_part = mod_spec.split("/", 1)[0]
+            if _is_secret_key(mod_name_part):
+                raise ValueError(f"Rejected: module name '{mod_name_part}' matches secret key pattern")
         except ValueError as e:
-            print(f"warning: skipping module (secret-like): {e}", file=sys.stderr)
-            continue
+            print(f"error: explicit module rejected (secret-like): {e}", file=sys.stderr)
+            con.close()
+            return 1
 
         parts = mod_spec.split("/", 1)
         mod_name = parts[0]
@@ -662,8 +714,9 @@ def cmd_collect(args: argparse.Namespace) -> int:
             "INSERT INTO observations"
             " (snapshot_id, subject, kind, claim, evidence_level, outcome,"
             " provenance_sha256, command_exit_code, source_kind, created_at)"
-            " VALUES (?, ?, 'probe', 'module show', 'declared', ?, ?, ?, ?, ?)",
+            " VALUES (?, ?, 'probe', ?, 'declared', ?, ?, ?, ?, ?)",
             (snapshot_id, mod_spec,
+             json.dumps(show_cmd),
              "success" if rc == 0 else "failure",
              cmd_sha, rc, src_kind, now),
         )
@@ -726,6 +779,90 @@ def cmd_collect(args: argparse.Namespace) -> int:
                 except ValueError:
                     pass
 
+    # --- Executable collection (which + --version) ---
+    executables = list(args.executable) if hasattr(args, "executable") and args.executable else []
+    for exe_name in executables:
+        try:
+            _validate_string("executable_name", exe_name)
+        except ValueError:
+            continue
+
+        # which probe
+        which_c = [which_cmd, exe_name]
+        rc_w, stdout_w = _run_bounded(which_c, timeout, subprocess_env)
+        cmd_sha_w = _sha256_cmd(which_c)
+        now_w = _utc_now()
+        con.execute(
+            "INSERT INTO observations"
+            " (snapshot_id, subject, kind, claim, evidence_level, outcome,"
+            " provenance_sha256, command_exit_code, source_kind, created_at)"
+            " VALUES (?, ?, 'exe_probe', ?, 'detected', ?, ?, ?, 'which_probe', ?)",
+            (snapshot_id, exe_name, json.dumps(which_c),
+             "success" if rc_w == 0 else "failure",
+             cmd_sha_w, rc_w, now_w),
+        )
+
+        exe_path = None
+        if rc_w == 0:
+            path_line = stdout_w.strip().splitlines()[0].strip() if stdout_w.strip() else ""
+            if path_line.startswith("/"):
+                try:
+                    _validate_string("exe_path", path_line)
+                    exe_path = path_line
+                except ValueError:
+                    exe_path = None
+
+        # version probe — run the RESOLVED executable directly with --version
+        # (not via which, which would invoke the which program as a proxy)
+        exe_version = None
+        if exe_path:
+            ver_c = [exe_path, "--version"]
+        else:
+            ver_c = [exe_name, "--version"]
+        rc_v, stdout_v = _run_bounded(ver_c, timeout, subprocess_env)
+        cmd_sha_v = _sha256_cmd(ver_c)
+        now_v = _utc_now()
+        con.execute(
+            "INSERT INTO observations"
+            " (snapshot_id, subject, kind, claim, evidence_level, outcome,"
+            " provenance_sha256, command_exit_code, source_kind, created_at)"
+            " VALUES (?, ?, 'exe_probe', ?, 'detected', ?, ?, ?, 'version_probe', ?)",
+            (snapshot_id, exe_name, json.dumps(ver_c),
+             "success" if rc_v == 0 else "failure",
+             cmd_sha_v, rc_v, now_v),
+        )
+        # Parse first version token from output (e.g. "gcc (GCC) 11.2.0")
+        # Safe: skip empty tokens; look for tokens starting with a digit containing a dot.
+        if rc_v == 0 and stdout_v:
+            for tok in stdout_v.split():
+                if not tok:
+                    continue
+                if tok[0].isdigit() and "." in tok:
+                    ver_candidate = tok.rstrip(",;")
+                    # Only accept if it still looks like a version after stripping
+                    if ver_candidate and ver_candidate[0].isdigit():
+                        try:
+                            _validate_string("exe_version", ver_candidate)
+                            exe_version = ver_candidate
+                        except ValueError:
+                            pass
+                    break
+
+        # Insert executable entity
+        entity_name = exe_path if exe_path else exe_name
+        try:
+            _validate_string("entity_name", entity_name)
+            now_e = _utc_now()
+            con.execute(
+                "INSERT OR IGNORE INTO entities"
+                " (snapshot_id, name, version, kind, active, evidence_level,"
+                " source_kind, created_at)"
+                " VALUES (?, ?, ?, 'executable', 0, 'detected', 'which_probe', ?)",
+                (snapshot_id, entity_name, exe_version, now_e),
+            )
+        except (ValueError, sqlite3.IntegrityError):
+            pass
+
     # --- ELF analysis ---
     elf_paths = list(args.elf_path) if hasattr(args, "elf_path") and args.elf_path else []
     for elf_path in elf_paths:
@@ -783,6 +920,13 @@ def cmd_collect(args: argparse.Namespace) -> int:
 
 def cmd_search(args: argparse.Namespace) -> int:
     db_path = Path(args.db)
+    limit = getattr(args, "limit", 100)
+    if limit is None:
+        limit = 100
+    if limit <= 0:
+        print("error: --limit must be positive", file=sys.stderr)
+        return 1
+
     con = _open_ro(db_path)
 
     snap = con.execute("SELECT id, status, collection_status FROM snapshots").fetchone()
@@ -796,8 +940,9 @@ def cmd_search(args: argparse.Namespace) -> int:
         " FROM entity_fts f"
         " JOIN entities e ON e.id = f.rowid"
         " WHERE entity_fts MATCH ?"
-        " ORDER BY e.name, e.version, e.kind",
-        (query,),
+        " ORDER BY e.name, e.version, e.kind"
+        " LIMIT ?",
+        (query, limit),
     ).fetchall()
 
     results = []
@@ -813,28 +958,48 @@ def cmd_search(args: argparse.Namespace) -> int:
 
     # Merge overlay if provided
     overlay_path = getattr(args, "overlay", None)
+    overlay_snap_id = None
+    overlay_error = None
     if overlay_path:
-        _merge_overlay_search(results, Path(overlay_path), query, str(db_path))
+        overlay_snap_id, overlay_error = _merge_overlay_search(
+            results, Path(overlay_path), query, str(db_path), limit
+        )
+
+    # Apply limit to the combined results after merging overlay
+    results = results[:limit]
 
     output = {
         "schema_version": SCHEMA_VERSION,
         "snapshot_id": snap_id,
+        "site_snapshot_id": snap_id,
         "collection_status": collection_status,
         "query": query,
         "results": results,
     }
+    if overlay_path:
+        output["overlay_snapshot_id"] = overlay_snap_id
+
+    if overlay_error:
+        con.close()
+        print(f"error: overlay read failed: {overlay_error}", file=sys.stderr)
+        return 1
+
     print(json.dumps(output, sort_keys=True))
     con.close()
     return 0
 
 
-def _merge_overlay_search(results: List, overlay_path: Path, query: str, site_db: str) -> None:
-    """Append overlay observations matching query into results list (in-place)."""
+def _merge_overlay_search(results: List, overlay_path: Path, query: str, site_db: str, limit: int = 100) -> Tuple[Optional[str], Optional[str]]:
+    """Append overlay observations matching query into results list (in-place).
+    Returns (overlay_snapshot_id, error_message). error_message is None on success.
+    """
     if not overlay_path.exists():
-        return
+        return None, None
     try:
         ov_con = sqlite3.connect(str(overlay_path))
         ov_con.row_factory = sqlite3.Row
+        snap_row = ov_con.execute("SELECT id FROM snapshots LIMIT 1").fetchone()
+        overlay_snap_id = snap_row["id"] if snap_row else None
         rows = ov_con.execute(
             "SELECT subject, kind, outcome, evidence_level, env_profile_id FROM observations"
             " WHERE subject LIKE ?"
@@ -850,8 +1015,9 @@ def _merge_overlay_search(results: List, overlay_path: Path, query: str, site_db
                 "source_db": str(overlay_path),
             })
         ov_con.close()
-    except Exception:
-        pass  # Overlay errors are non-fatal
+        return overlay_snap_id, None
+    except Exception as exc:
+        return None, str(exc)
 
 
 # ---------------------------------------------------------------------------
@@ -905,8 +1071,19 @@ def cmd_show(args: argparse.Namespace) -> int:
 def cmd_dependencies(args: argparse.Namespace) -> int:
     db_path = Path(args.db)
     name = args.name
-    max_depth = getattr(args, "max_depth", 10) or 10
-    limit = getattr(args, "limit", 100) or 100
+    max_depth = getattr(args, "max_depth", 10)
+    if max_depth is None:
+        max_depth = 10
+    limit = getattr(args, "limit", 100)
+    if limit is None:
+        limit = 100
+
+    if max_depth <= 0:
+        print("error: --max-depth must be positive", file=sys.stderr)
+        return 1
+    if limit <= 0:
+        print("error: --limit must be positive", file=sys.stderr)
+        return 1
 
     con = _open_ro(db_path)
     snap = con.execute("SELECT id FROM snapshots").fetchone()
@@ -928,8 +1105,19 @@ def cmd_dependencies(args: argparse.Namespace) -> int:
 def cmd_reverse_dependencies(args: argparse.Namespace) -> int:
     db_path = Path(args.db)
     name = args.name
-    max_depth = getattr(args, "max_depth", 10) or 10
-    limit = getattr(args, "limit", 100) or 100
+    max_depth = getattr(args, "max_depth", 10)
+    if max_depth is None:
+        max_depth = 10
+    limit = getattr(args, "limit", 100)
+    if limit is None:
+        limit = 100
+
+    if max_depth <= 0:
+        print("error: --max-depth must be positive", file=sys.stderr)
+        return 1
+    if limit <= 0:
+        print("error: --limit must be positive", file=sys.stderr)
+        return 1
 
     con = _open_ro(db_path)
     snap = con.execute("SELECT id FROM snapshots").fetchone()
@@ -1048,6 +1236,40 @@ def cmd_observe(args: argparse.Namespace) -> int:
     site_path = Path(args.site)
     attempt_root = Path(args.attempt_root)
 
+    # --- Verify site database: sidecar, schema, complete status ---
+    site_sidecar = Path(str(site_path) + ".sha256")
+    if not site_sidecar.exists():
+        print("error: site .sha256 sidecar not found; site must be finalized", file=sys.stderr)
+        return 1
+
+    # Verify site digest
+    site_sidecar_parts = site_sidecar.read_text().strip().split()
+    if len(site_sidecar_parts) < 1:
+        print("error: malformed site .sha256 sidecar", file=sys.stderr)
+        return 1
+    expected_site_digest = site_sidecar_parts[0]
+    actual_site_digest = _sha256_file(site_path)
+    if actual_site_digest != expected_site_digest:
+        print("error: site database digest mismatch", file=sys.stderr)
+        return 1
+
+    # Verify site is finalized (complete status)
+    try:
+        site_con = _open_ro(site_path)
+        site_snap = site_con.execute(
+            "SELECT id, status FROM snapshots"
+        ).fetchone()
+        site_con.close()
+    except Exception as e:
+        print(f"error: cannot open site database: {e}", file=sys.stderr)
+        return 1
+
+    if not site_snap or site_snap["status"] != "complete":
+        print("error: site snapshot must be finalized (status=complete)", file=sys.stderr)
+        return 1
+
+    site_snapshot_id = site_snap["id"]
+
     try:
         payload = json.loads(args.input)
     except (json.JSONDecodeError, TypeError) as e:
@@ -1058,6 +1280,12 @@ def cmd_observe(args: argparse.Namespace) -> int:
     missing = _REQUIRED_OBSERVATION_FIELDS - set(payload.keys())
     if missing:
         print(f"error: missing required fields: {sorted(missing)}", file=sys.stderr)
+        return 1
+
+    # Validate evidence_sha256 shape: must be exactly 64 lowercase hex chars
+    ev_sha256 = payload.get("evidence_sha256", "")
+    if not isinstance(ev_sha256, str) or not _SHA256_RE.match(ev_sha256):
+        print("error: evidence_sha256 must be exactly 64 lowercase hex chars", file=sys.stderr)
         return 1
 
     # Validate evidence_path
@@ -1073,6 +1301,20 @@ def cmd_observe(args: argparse.Namespace) -> int:
     except ValueError:
         print("error: evidence_path must be under attempt_root", file=sys.stderr)
         return 1
+
+    # Evidence file must exist (reject missing evidence — no TOCTOU gap allowed)
+    if not ev_path_obj.exists():
+        print("error: evidence_path does not exist", file=sys.stderr)
+        return 1
+
+    # Verify actual file digest matches evidence_sha256 (read once, close immediately)
+    actual_ev_digest = _sha256_file(ev_path_obj)
+    if actual_ev_digest != ev_sha256.lower():
+        print("error: evidence_sha256 does not match actual file content", file=sys.stderr)
+        return 1
+
+    # Store the resolved (canonical) evidence path to avoid symlink confusion
+    ev_path = str(ev_path_obj)
 
     # Secret-validate all string fields in payload
     for k, v in payload.items():
@@ -1116,6 +1358,10 @@ def cmd_observe(args: argparse.Namespace) -> int:
                 "INSERT INTO metadata (key, value) VALUES (?, ?)",
                 ("site_db", str(site_path)),
             )
+            ov_con.execute(
+                "INSERT INTO metadata (key, value) VALUES (?, ?)",
+                ("site_snapshot_id", site_snapshot_id),
+            )
             ov_con.commit()
             ov_con.close()
         except Exception as e:
@@ -1130,6 +1376,21 @@ def cmd_observe(args: argparse.Namespace) -> int:
     ov_con = sqlite3.connect(str(overlay_path))
     ov_con.execute("PRAGMA foreign_keys=ON")
     ov_con.row_factory = sqlite3.Row
+
+    # If overlay already existed, verify it was created for the same site snapshot
+    if overlay_exists:
+        stored_site_snap_row = ov_con.execute(
+            "SELECT value FROM metadata WHERE key='site_snapshot_id'"
+        ).fetchone()
+        stored_site_snap_id = stored_site_snap_row["value"] if stored_site_snap_row else None
+        if stored_site_snap_id and stored_site_snap_id != site_snapshot_id:
+            ov_con.close()
+            print(
+                f"error: overlay was created for site_snapshot_id={stored_site_snap_id!r},"
+                f" but current site has snapshot_id={site_snapshot_id!r}",
+                file=sys.stderr,
+            )
+            return 1
 
     try:
         snap = ov_con.execute("SELECT id FROM snapshots LIMIT 1").fetchone()
@@ -1202,6 +1463,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_col.add_argument("--module-limit", type=int, default=None)
     p_col.add_argument("--command-timeout", type=int, default=30)
     p_col.add_argument("--elf-path", action="append", default=[])
+    p_col.add_argument("--executable", action="append", default=[])
 
     # search
     p_srch = sub.add_parser("search")
@@ -1240,18 +1502,6 @@ def _build_parser() -> argparse.ArgumentParser:
     p_obs.add_argument("--input", required=True)
     p_obs.add_argument("--attempt-root", required=True)
 
-    # insert-test-entity (test helper)
-    p_ite = sub.add_parser("insert-test-entity")
-    p_ite.add_argument("--db", required=True)
-    p_ite.add_argument("--metadata", required=True)
-
-    # insert-test-relation (test helper)
-    p_itr = sub.add_parser("insert-test-relation")
-    p_itr.add_argument("--db", required=True)
-    p_itr.add_argument("--from", dest="from_entity", required=True)
-    p_itr.add_argument("--to", dest="to_entity", required=True)
-    p_itr.add_argument("--kind", required=True)
-
     return parser
 
 
@@ -1278,8 +1528,6 @@ def main() -> int:
         "reverse-dependencies": cmd_reverse_dependencies,
         "status": cmd_status,
         "observe": cmd_observe,
-        "insert-test-entity": cmd_insert_test_entity,
-        "insert-test-relation": cmd_insert_test_relation,
     }
     fn = dispatch.get(args.command)
     if not fn:
