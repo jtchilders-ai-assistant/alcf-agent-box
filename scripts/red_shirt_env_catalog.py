@@ -697,34 +697,34 @@ def cmd_collect(args: argparse.Namespace) -> int:
                             pass
 
             elif directive in ("prereq", "load"):
-                if rest:
-                    dep_spec = rest.split()[0]
-                    try:
-                        _validate_string("dep_spec", dep_spec)
-                        now = _utc_now()
-                        con.execute(
-                            "INSERT INTO relations"
-                            " (snapshot_id, from_entity, to_entity, kind, created_at)"
-                            " VALUES (?, ?, ?, 'prereq', ?)",
-                            (snapshot_id, mod_spec, dep_spec, now),
-                        )
-                    except ValueError:
-                        pass
+                # field is the required module name; rest may have additional args
+                dep_spec = (rest.split()[0] if rest else field)
+                try:
+                    _validate_string("dep_spec", dep_spec)
+                    now = _utc_now()
+                    con.execute(
+                        "INSERT INTO relations"
+                        " (snapshot_id, from_entity, to_entity, kind, created_at)"
+                        " VALUES (?, ?, ?, 'prereq', ?)",
+                        (snapshot_id, mod_spec, dep_spec, now),
+                    )
+                except ValueError:
+                    pass
 
             elif directive == "conflict":
-                if rest:
-                    conflict_spec = rest.split()[0]
-                    try:
-                        _validate_string("conflict_spec", conflict_spec)
-                        now = _utc_now()
-                        con.execute(
-                            "INSERT INTO relations"
-                            " (snapshot_id, from_entity, to_entity, kind, created_at)"
-                            " VALUES (?, ?, ?, 'conflict', ?)",
-                            (snapshot_id, mod_spec, conflict_spec, now),
-                        )
-                    except ValueError:
-                        pass
+                # field is the conflicting module; rest may have additional args
+                conflict_spec = (rest.split()[0] if rest else field)
+                try:
+                    _validate_string("conflict_spec", conflict_spec)
+                    now = _utc_now()
+                    con.execute(
+                        "INSERT INTO relations"
+                        " (snapshot_id, from_entity, to_entity, kind, created_at)"
+                        " VALUES (?, ?, ?, 'conflict', ?)",
+                        (snapshot_id, mod_spec, conflict_spec, now),
+                    )
+                except ValueError:
+                    pass
 
     # --- ELF analysis ---
     elf_paths = list(args.elf_path) if hasattr(args, "elf_path") and args.elf_path else []
