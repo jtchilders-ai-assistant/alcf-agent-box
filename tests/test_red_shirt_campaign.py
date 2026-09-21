@@ -70,6 +70,7 @@ raise SystemExit({probe_rc})
     hermes_body = f"""
 import json, os, pathlib, sys, time
 root=pathlib.Path.cwd()
+pathlib.Path({str(tmp_path / 'hermes.pid')!r}).write_text(str(os.getpid()))
 time.sleep({hermes_sleep})
 pathlib.Path({str(events)!r}).open("a").write("hermes\\n")
 pathlib.Path({str(tmp_path / 'hermes-args.json')!r}).write_text(json.dumps(sys.argv[1:]))
@@ -175,6 +176,9 @@ def test_campaign_times_out_hermes_and_synthesizes_failure(tmp_path):
     assert payload["failure"]["kind"] == "hermes_timeout"
     assert payload["agent"]["exit_code"] is None
     assert (task / "FAILED").is_file()
+    pid = int((tmp_path / "hermes.pid").read_text())
+    with __import__("pytest").raises(ProcessLookupError):
+        os.kill(pid, 0)
 
 
 def test_campaign_synthesizes_failure_when_hermes_exits_without_artifacts(tmp_path):
