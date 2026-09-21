@@ -18,6 +18,8 @@ REQUIRED_COPY_DESTINATIONS = (
     "/opt/red-shirt-polaris/connect_proxy.py",
     "/opt/red-shirt-polaris/red_shirt_config.py",
     "/opt/red-shirt-polaris/red_shirt_probe.py",
+    "/opt/red-shirt-polaris/red_shirt_task_context.py",
+    "/opt/red-shirt-polaris/red_shirt_campaign.py",
     "/opt/red-shirt-polaris/entrypoint.sh",
     "/opt/red-shirt-polaris/config/",
     "/opt/red-shirt-polaris/docs/",
@@ -34,10 +36,12 @@ REQUIRED_COPY_DIRECTIVES = (
     "COPY scripts/connect_proxy.py /opt/red-shirt-polaris/connect_proxy.py",
     "COPY scripts/red_shirt_config.py /opt/red-shirt-polaris/red_shirt_config.py",
     "COPY scripts/red_shirt_probe.py /opt/red-shirt-polaris/red_shirt_probe.py",
+    "COPY scripts/red_shirt_task_context.py /opt/red-shirt-polaris/red_shirt_task_context.py",
+    "COPY scripts/red_shirt_campaign.py /opt/red-shirt-polaris/red_shirt_campaign.py",
     "COPY scripts/red_shirt_entrypoint.sh /opt/red-shirt-polaris/entrypoint.sh",
     "COPY config/red-shirt-polaris/ /opt/red-shirt-polaris/config/",
     "COPY docs/polaris-snapshot/ /opt/red-shirt-polaris/docs/",
-    "COPY skills/ /opt/red-shirt-polaris/skills/",
+    "COPY config/red-shirt-polaris/skills/ /opt/red-shirt-polaris/skills/",
 )
 
 
@@ -254,6 +258,28 @@ def test_soul_is_non_roleplay_and_covers_full_operating_contract():
         "job lifetime",
     ):
         assert phrase in lowered, f"SOUL.md missing required operating phrase: {phrase}"
+
+
+def test_soul_covers_resident_execution_and_evidence_contract():
+    soul = (ROOT / "config/red-shirt-polaris/SOUL.md").read_text()
+    lowered = soul.lower()
+    for phrase in (
+        "packaging boundary",
+        "dependency discovery and installation",
+        "build, tests,",
+        "execution, and scientific analysis",
+        "launch acknowledgement",
+        "terminal result",
+        "contradictory evidence",
+        "requested configuration",
+        "detected configuration",
+        "compiled and linked",
+        "runtime evidence",
+        "terminal checkpoint",
+        "time exhaustion",
+        "context exhaustion",
+    ):
+        assert phrase in lowered, f"SOUL.md missing resident evidence rule: {phrase}"
 
 
 def test_doc_index_has_provenance_for_every_snapshot():

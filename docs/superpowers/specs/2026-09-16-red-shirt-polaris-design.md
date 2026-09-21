@@ -125,6 +125,12 @@ Official documentation and local measurements must remain visibly distinct. Loca
 
 ## Persistent and ephemeral state
 
+The Apptainer image is a packaging and reproducibility boundary, not the
+security boundary for host execution. Red Shirt is intentionally permitted to
+run arbitrary commands with the sponsoring user's privileges inside its PBS
+allocation. The Unix account, mounted filesystems, and scheduler allocation
+remain the effective authorization boundaries.
+
 Persistent bind from Polaris `$HOME`:
 
 - Hermes config, sessions, memory, A2A conversations, and audit log;
@@ -141,6 +147,20 @@ Ephemeral job-local state under `/local/scratch/$USER/...`:
 - transient process logs copied to persistent storage before teardown when useful.
 
 The job removes the entire job-local root on exit. A login-node Tailscale daemon and the compute daemon must never share a state directory, socket, or port.
+
+One immutable SIF may back multiple identities, but each identity must receive
+a separate writable Hermes home, secrets directory, Tailscale state/socket,
+ports, hostname, and A2A credentials. Concurrent agents must never share one
+writable Hermes home.
+
+For multi-node work, the launcher preserves the exact scheduler-provided
+`$PBS_NODEFILE` under the persistent per-job run directory and exposes that
+copy inside the container. Host modules are resolved before Apptainer starts;
+the resulting MPI executable/library environment and required Cray, NVIDIA,
+libfabric, `/soft`, and PALS paths are passed into the container. Red Shirt may
+then invoke host PALS `mpiexec --hostfile ...` directly. A native and a
+production-equivalent containerized two-node MPI hello-world are mandatory
+before an application is described as MPI-capable.
 
 ## Credentials and authorization
 

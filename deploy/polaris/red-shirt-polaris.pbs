@@ -114,6 +114,17 @@ ml use /soft/modulefiles
 ml spack-pe-base
 ml apptainer
 
+# Resolve the site MPI environment on the host. The container is a packaging
+# boundary, not an execution sandbox: Red Shirt intentionally receives the
+# user's direct host MPI capability within this PBS allocation.
+MPI_ENV_HELPER="${MPI_ENV_HELPER:-$BASE_DIR/red_shirt_mpi_env.sh}"
+if [ ! -r "$MPI_ENV_HELPER" ]; then
+  printf 'ERROR: host MPI environment helper is missing: %s\n' "$MPI_ENV_HELPER" >&2
+  exit 1
+fi
+# shellcheck source=../../scripts/red_shirt_mpi_env.sh
+source "$MPI_ENV_HELPER"
+
 export HTTP_PROXY="http://proxy.alcf.anl.gov:3128"
 export HTTPS_PROXY="$HTTP_PROXY"
 export http_proxy="$HTTP_PROXY"
@@ -167,6 +178,16 @@ check_credential_file "$CA_FILE" "Headscale/Caddy root CA"
 mkdir -p "$HERMES_HOME_DIR" "$HERMES_HOME_DIR/runs/$JOB_ID" "$STATE_DIR"
 chmod 700 "$STATE_DIR"
 
+# Preserve the scheduler-provided host file exactly. Never reconstruct the
+# allocation from hostnames or assume rank placement. This copy is both the
+# in-container launch input and durable provenance after the PBS job exits.
+test -f "$PBS_NODEFILE" && test -r "$PBS_NODEFILE" || {
+  printf 'ERROR: PBS_NODEFILE is not a readable regular file: %s\n' "${PBS_NODEFILE:-<unset>}" >&2
+  exit 1
+}
+install -m 600 "$PBS_NODEFILE" "$RUN_DIR/pbs_nodefile"
+sha256sum "$RUN_DIR/pbs_nodefile" > "$RUN_DIR/pbs_nodefile.sha256"
+
 # ---------------------------------------------------------------------------
 # SIF checksum verification -- MUST happen before any execution. A qsub or
 # qdel exit code alone is never sufficient evidence the artifact is intact.
@@ -191,6 +212,11 @@ fi
   printf 'source_image=%s\n' "$RED_SHIRT_IMAGE"
   printf 'source_manifest_digest=%s\n' "$RED_SHIRT_DIGEST"
   printf 'sif_sha256=%s\n' "$(sha256sum "$SIF" | cut -d' ' -f1)"
+  printf 'pbs_nodefile_source=%s\n' "$PBS_NODEFILE"
+  printf 'pbs_nodefile_sha256=%s\n' "$(sha256sum "$RUN_DIR/pbs_nodefile" | cut -d' ' -f1)"
+  printf 'host_mpiexec=%s\n' "$HOST_MPIEXEC"
+  printf 'pals_runtime_dir=%s\n' "$PALS_RUNTIME_DIR"
+  module list 2>&1
   apptainer --version
   apptainer exec "$SIF" hermes --version || true
   apptainer exec "$SIF" tailscale version || true
@@ -216,6 +242,12 @@ export APPTAINERENV_RED_SHIRT_TS_STATE_DIR="/tmp/ts-state"
 export APPTAINERENV_RED_SHIRT_READY_OUTPUT="/opt/data/runs/${JOB_ID}/ready.json"
 export APPTAINERENV_RED_SHIRT_TERMINAL_OUTPUT="/opt/data/runs/${JOB_ID}/terminal.json"
 export APPTAINERENV_RED_SHIRT_ALCF_PROXY="proxy.alcf.anl.gov:3128"
+export APPTAINERENV_RED_SHIRT_HOSTFILE="/opt/data/runs/${JOB_ID}/pbs_nodefile"
+export APPTAINERENV_PBS_NODEFILE="$APPTAINERENV_RED_SHIRT_HOSTFILE"
+export APPTAINERENV_RED_SHIRT_HOST_MPIEXEC="$HOST_MPIEXEC"
+export APPTAINERENV_PATH="$HOST_MPI_PATH"
+export APPTAINERENV_LD_LIBRARY_PATH="$HOST_MPI_LD_LIBRARY_PATH"
+export APPTAINERENV_CRAY_LD_LIBRARY_PATH="$CRAY_LD_LIBRARY_PATH"
 export APPTAINERENV_HTTP_PROXY="$HTTP_PROXY"
 export APPTAINERENV_HTTPS_PROXY="$HTTPS_PROXY"
 export APPTAINERENV_http_proxy="$http_proxy"
@@ -230,6 +262,11 @@ apptainer run --cleanenv \
   --bind "$HERMES_HOME_DIR:/opt/data" \
   --bind "$SECRETS_DIR:/mnt/secrets:ro" \
   --bind "$STATE_DIR:/tmp" \
+  --bind "/opt/cray:/opt/cray:ro" \
+  --bind "/opt/nvidia:/opt/nvidia:ro" \
+  --bind "/opt/cray/libfabric:/opt/cray/libfabric:ro" \
+  --bind "/soft:/soft:ro" \
+  --bind "$PALS_RUNTIME_DIR:$PALS_RUNTIME_DIR" \
   "$SIF" \
   >"$RUN_DIR/stdout.log" 2>"$RUN_DIR/stderr.log" &
 APPTAINER_PID=$!

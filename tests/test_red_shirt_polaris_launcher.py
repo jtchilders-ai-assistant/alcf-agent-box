@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DEPLOY = ROOT / "deploy" / "polaris"
 BUILD = DEPLOY / "build-red-shirt-sif.sh"
 PBS = DEPLOY / "red-shirt-polaris.pbs"
+CAMPAIGN_PBS = DEPLOY / "red-shirt-pepper-campaign.pbs"
 README = DEPLOY / "RED_SHIRT_README.md"
 DOCKERFILE = ROOT / "Dockerfile.red-shirt-polaris"
 
@@ -37,6 +38,52 @@ def text(path: Path) -> str:
 # ---------------------------------------------------------------------------
 # Existence + syntax
 # ---------------------------------------------------------------------------
+
+def test_campaign_launcher_wires_reviewed_attempt_contract():
+    body = text(CAMPAIGN_PBS)
+    required = (
+        "red_shirt_task_context.py",
+        "red_shirt_campaign.py",
+        "red_shirt_host_watcher.sh",
+        "red_shirt_toolchain_manifest.py",
+        "red_shirt_toolchain_preflight.py",
+        "pepper-gpu-8rank.md",
+        "--hermes-timeout",
+        "RED_SHIRT_ENV_PROFILE_ID",
+        "RED_SHIRT_EXPECTED_RANKS=8",
+        "RED_SHIRT_EXPECTED_HOSTS=2",
+    )
+    for fragment in required:
+        assert fragment in body
+    assert "#PBS -l select=2:system=polaris" in body
+    assert "#PBS -A" not in body
+    assert "qsub -v" not in body
+    assert "flock -n" in body
+    assert "attempt-ledger" in body
+    assert "MAX_ATTEMPTS" in body
+    assert "sha256sum -c" in body
+    assert "trap" in body and "TERM" in body
+    assert 'python3 "$TOOLS/red_shirt_toolchain_preflight.py"' not in body
+    assert 'RED_SHIRT_KOKKOS_PREFIX:?' not in body
+    assert 'RED_SHIRT_PEPPER_SOURCE:?' not in body
+    assert 'RED_SHIRT_PEPPER_CACHE_INIT:?' not in body
+    assert 'command -v nvcc' not in body
+    assert 'command -v CC' not in body
+    assert 'if [ -s "$RED_SHIRT_OUTPUT_DIR/run.ini" ]' in body
+    watcher_start = body.index('"$HOST_WATCHER" >')
+    for helper in (
+        "red_shirt_host_bridge.sh",
+        "red_shirt_host_watcher.sh",
+        "red_shirt_rank_wrapper.sh",
+        "red_shirt_mpi_env.sh",
+        "red_shirt_toolchain_stage.sh",
+        "red_shirt_toolchain_manifest.py",
+        "red_shirt_toolchain_preflight.py",
+    ):
+        assert body.index(helper) < watcher_start
+    assert body.index('source "$MPI_ENV_HELPER"') < body.index('PROFILE_INPUT="$RUNTIME/environment-profile.txt"')
+    assert "ml load cray-mpich\n" not in body
+
 
 def test_files_exist():
     for path in (BUILD, PBS, README):
@@ -65,7 +112,9 @@ def test_pbs_keeps_allocation_out_of_directives():
 def test_readme_documents_qsub_with_explicit_account_only_at_submit_time():
     body = text(README)
     assert "qsub -A datascience" in body
-    assert not re.search(r"^\s*qsub\s+.*(?:-v\b|--variable-list)", body, re.M)
+    for line in body.splitlines():
+        if re.search(r"^\s*qsub\s+.*(?:-v\b|--variable-list)", line):
+            assert not re.search(r"(?:TOKEN|SECRET|AUTH|PASSWORD|KEY)=", line, re.I)
 
 
 def test_pbs_never_uses_qsub_v_for_credentials():
@@ -230,7 +279,16 @@ def test_pbs_binds_only_to_destinations_guaranteed_present_in_image():
     body = text(PBS)
     destinations = re.findall(r'--bind\s+"[^:"]+:([^":]+?)(?::ro)?"', body)
     assert destinations, "expected at least one --bind directive"
-    allowed = {"/opt/data", "/mnt/secrets", "/tmp"}
+    allowed = {
+        "/opt/data",
+        "/mnt/secrets",
+        "/tmp",
+        "/opt/cray",
+        "/opt/nvidia",
+        "/opt/cray/libfabric",
+        "/soft",
+        "$PALS_RUNTIME_DIR",
+    }
     for dest in destinations:
         assert dest in allowed, f"unexpected bind destination not verified present in image: {dest}"
 

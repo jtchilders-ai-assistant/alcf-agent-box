@@ -58,6 +58,38 @@ done
 memory, A2A conversation history, and the audit log all live there. Only
 Tailscale node identity and sockets are job-local and disposable.
 
+### Multiple isolated identities from one SIF
+
+The SIF is immutable and may be reused for multiple isolated Hermes agents.
+Give every identity a distinct writable home and secrets directory, for
+example:
+
+```text
+$HOME/hermes-agents/red-shirt/home  -> /opt/data
+$HOME/hermes-agents/blue-shirt/home -> /opt/data
+```
+
+Each home independently contains its `SOUL.md`, `config.yaml`, `.env`,
+`state.db`, memories, sessions, skills, logs, A2A records, and task files.
+Each concurrently running identity must also have distinct Tailscale state,
+socket, ports, hostname, A2A credentials, run directory, and scratch root.
+Never mount one writable Hermes home into concurrent agents: their SQLite WAL
+files, sockets, locks, credentials, and identities would collide.
+
+For each identity, stage a small instance-specific launcher that sets
+`BASE_DIR`, `HERMES_HOME_DIR`, and `SECRETS_DIR` before invoking the common
+launcher. Credentials remain files under that selected secrets directory.
+Do not pass either credentials or path configuration with `qsub -v`; keeping
+the complete instance definition in a reviewed launcher makes each deployment
+reproducible and avoids inheriting unrelated submit-shell state.
+
+```bash
+BASE_DIR="$HOME/hermes-agents/blue-shirt"
+HERMES_HOME_DIR="$BASE_DIR/home"
+SECRETS_DIR="$BASE_DIR/secrets"
+# The instance launcher then runs the common launch body with these values.
+```
+
 ## 2. Build the SIF
 
 Run on a Polaris node with the pinned image exported (see above):
@@ -98,6 +130,86 @@ Never use `qsub -v` for credentials — the launcher reads credential *paths*
 that default to `$HOME/red-shirt-polaris/secrets/...` and validates each
 file's metadata (existence, regular file, mode `0600`) before doing
 anything else. Credential contents are never printed, hashed, or logged.
+
+## Direct host and multi-node MPI access
+
+For this deployment, Apptainer is a **packaging boundary**, not a security
+sandbox. Red Shirt intentionally receives arbitrary user-level command access
+within its PBS allocation and mounted writable filesystems. It does not gain
+root, scheduler-administrator authority, another user's permissions, or access
+to nodes outside the allocation.
+
+The PBS launcher resolves `cray-mpich-abi` and the module environment on the
+host before entering Apptainer. It injects the resolved executable and library
+paths and read-only binds for `/opt/cray`, `/opt/nvidia`,
+`/opt/cray/libfabric`, `/soft`, and the live PALS runtime directory. This lets
+Red Shirt use host PALS `mpiexec` directly instead of requiring an MCP broker.
+
+The scheduler-provided host file is authoritative and is never synthesized or
+replaced with hard-coded hostnames. The launcher copies `$PBS_NODEFILE`
+verbatim and records its checksum:
+
+```text
+host:      $HOME/red-shirt-polaris/home/runs/<PBS_JOBID>/pbs_nodefile
+container: /opt/data/runs/<PBS_JOBID>/pbs_nodefile
+env:       RED_SHIRT_HOSTFILE=/opt/data/runs/<PBS_JOBID>/pbs_nodefile
+```
+
+Every multi-node command must pass that file explicitly, for example:
+
+```bash
+mpiexec --hostfile "$RED_SHIRT_HOSTFILE" -n 2 --ppn 1 \
+  apptainer exec <verified-binds-and-environment> <pinned.sif> <program>
+```
+
+Before using Pepper, submit the two-node acceptance job and require both its
+native and containerized MPI hello-world stages to pass:
+
+```bash
+qsub -A datascience \
+  -v SIF="$HOME/red-shirt-polaris/<pinned>.sif" \
+  deploy/polaris/red-shirt-mpi-acceptance.pbs
+```
+
+`SIF` is a non-secret path; credentials must never be passed with `qsub -v`.
+Acceptance evidence, including the exact
+host file, module list, versions, link audit, rank placement, and terminal
+record, is written beneath
+`$HOME/red-shirt-polaris/home/runs/<PBS_JOBID>/mpi-acceptance/`.
+
+### Bounded autonomous Pepper campaign
+
+Stage these image-managed campaign tools under
+`$HOME/red-shirt-polaris/campaign-tools/` from the exact merged revision,
+preserving executable modes:
+
+- `red_shirt_host_bridge.sh`
+- `red_shirt_host_watcher.sh`
+- `red_shirt_host_client.sh`
+- `red_shirt_rank_wrapper.sh`
+- `red_shirt_gpu_rank_probe.py`
+- `red_shirt_mpi_env.sh`
+- `red_shirt_toolchain_stage.sh`
+- `red_shirt_toolchain_manifest.py`
+- `red_shirt_toolchain_preflight.py`
+
+Then submit the dedicated
+one-shot launcher with a reviewed instance wrapper that exports only non-secret paths
+(`SIF`, and optional `MAX_ATTEMPTS`/`HERMES_TIMEOUT`); do not use `qsub -v` for
+credentials:
+
+```bash
+qsub -A datascience deploy/polaris/red-shirt-pepper-campaign.pbs
+```
+
+The launcher allocates exactly two nodes, verifies the pinned SIF checksum,
+serializes attempts through `attempt-ledger.lock`, defaults to one total attempt,
+starts the correlated host watcher, generates attempt-local context and the ordered
+seven-stage preflight contract, refreshes and smokes inference, and invokes the
+bounded campaign wrapper. Red Shirt—not the launcher—selects and installs candidate
+application dependencies and executes the preflight before configuring/building
+Pepper. Attempt evidence is retained under
+`$HOME/red-shirt-polaris/home/campaigns/pepper-gpu-8rank/attempts/<NNN>/`.
 
 ## 4. Monitor
 

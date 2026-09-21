@@ -627,21 +627,33 @@ managed_seed() {  # $1=src $2=dst $3=label
   fi
 }
 
+managed_seed_tree() {  # $1=source_dir $2=destination_dir $3=label_prefix
+  local source_dir="$1" destination_dir="$2" label_prefix="$3" relative
+  [ -d "$source_dir" ] || return 0
+  while IFS= read -r -d '' relative; do
+    relative="${relative#./}"
+    managed_seed \
+      "$source_dir/$relative" \
+      "$destination_dir/$relative" \
+      "$label_prefix/$relative"
+  done < <(
+    cd "$source_dir"
+    "$PYTHON_BIN" - <<'PYEOF'
+import os
+import sys
+for root, dirs, files in os.walk("."):
+    dirs.sort()
+    files.sort()
+    for name in files:
+        path = os.path.join(root, name)
+        sys.stdout.buffer.write(path.encode("utf-8") + b"\0")
+PYEOF
+  )
+}
+
 managed_seed "$RS_DIR/config/SOUL.md" "$RS_HOME/SOUL.md" "SOUL.md"
-if [ -d "$RS_DIR/docs" ]; then
-  mkdir -p "$RS_HOME/docs"
-  for f in "$RS_DIR"/docs/*; do
-    [ -e "$f" ] || continue
-    managed_seed "$f" "$RS_HOME/docs/$(basename "$f")" "docs/$(basename "$f")"
-  done
-fi
-if [ -d "$RS_DIR/skills" ]; then
-  mkdir -p "$RS_HOME/skills"
-  for f in "$RS_DIR"/skills/*; do
-    [ -e "$f" ] || continue
-    managed_seed "$f" "$RS_HOME/skills/$(basename "$f")" "skills/$(basename "$f")"
-  done
-fi
+managed_seed_tree "$RS_DIR/docs" "$RS_HOME/docs" "docs"
+managed_seed_tree "$RS_DIR/skills" "$RS_HOME/skills" "skills"
 
 # ---------------------------------------------------------------------------
 # Gate 9: launch the Hermes A2A gateway as an owned foreground child.
