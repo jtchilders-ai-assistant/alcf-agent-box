@@ -153,16 +153,22 @@ def run(args):
     token_path = runtime_root / "inference.token"
     smoke_path = runtime_root / "inference-smoke.json"
     try:
-        token_fd = os.open(str(token_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(token_fd, "w", encoding="utf-8") as stream:
+        try:
             token = run_checked(
                 [str(args.token_helper), "get_access_token", "--service", "inference"],
-                stdout=stream,
+                stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
             )
-        if token.returncode:
+        except CampaignError:
             raise CampaignError("token_refresh_failed", "Could not obtain a fresh inference token.")
+        if token.returncode or not token.stdout.strip():
+            raise CampaignError("token_refresh_failed", "Could not obtain a fresh inference token.")
+        access_token = token.stdout.strip()
+        token_fd = os.open(str(token_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(token_fd, "w", encoding="utf-8") as stream:
+            token_fd = -1
+            stream.write(access_token + "\n")
 
         with smoke_path.open("w", encoding="utf-8") as smoke:
             probe = run_checked(
@@ -185,6 +191,8 @@ def run(args):
         token_path.unlink(missing_ok=True)
 
     prompt = prompt_file.read_text(encoding="utf-8")
+    agent_env = os.environ.copy()
+    agent_env["ALCF_ACCESS_TOKEN"] = access_token
     with (runtime_root / "agent.stdout").open("w", encoding="utf-8") as stdout, \
             (runtime_root / "agent.stderr").open("w", encoding="utf-8") as stderr:
         command = [str(args.hermes_bin), "--yolo", "--in", str(task_root), "-z", prompt]
@@ -195,6 +203,7 @@ def run(args):
                 stdout=stdout,
                 stderr=stderr,
                 text=True,
+                env=agent_env,
                 start_new_session=True,
             )
         except OSError as exc:

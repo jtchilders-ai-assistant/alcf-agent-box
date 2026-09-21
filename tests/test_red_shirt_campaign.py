@@ -79,6 +79,7 @@ if {hermes_child_sleep}:
 time.sleep({hermes_sleep})
 pathlib.Path({str(events)!r}).open("a").write("hermes\\n")
 pathlib.Path({str(tmp_path / 'hermes-args.json')!r}).write_text(json.dumps(sys.argv[1:]))
+pathlib.Path({str(tmp_path / 'hermes-token.txt')!r}).write_text(os.environ.get('ALCF_ACCESS_TOKEN', ''))
 assert (root / "AGENTS.md").is_file()
 assert (root / "ENV.md").is_file()
 assert (root / "STATUS.json").is_file()
@@ -120,6 +121,8 @@ def test_campaign_refreshes_smokes_generates_context_then_runs_hermes(tmp_path):
     args = json.loads((tmp_path / "hermes-args.json").read_text())
     assert args[:3] == ["--yolo", "--in", str(task)]
     assert "-z" in args
+    assert secret not in json.dumps(args)
+    assert (tmp_path / "hermes-token.txt").read_text() == secret
     assert (task / "DONE").is_file()
     assert not (task / "FAILED").exists()
     combined = result.stdout + result.stderr + (runtime / "inference-smoke.json").read_text()
