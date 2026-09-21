@@ -115,8 +115,11 @@ def synthesize_failure(task_root, runtime_root, kind, message, agent_exit=None):
             "- Failure kind: `%s`\n- Detail: %s\n- Last checkpoint: `%s`\n"
             % (kind, message, payload["last_checkpoint"].get("phase", "unknown")),
         )
-    (task_root / "DONE").unlink(missing_ok=True)
+    # Publish failure before removing a contradictory success marker. A monitor
+    # may briefly observe both markers, which is explicitly invalid and causes
+    # it to wait/re-read; it must never observe a terminal task with no marker.
     atomic_write(task_root / "FAILED", "wrapper-generated\n")
+    (task_root / "DONE").unlink(missing_ok=True)
 
 
 def run_checked(command, **kwargs):

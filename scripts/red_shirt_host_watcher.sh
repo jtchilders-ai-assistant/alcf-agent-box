@@ -70,7 +70,8 @@ while :; do
       if [ ! -s "$RESPONSE" ]; then
         write_error_response "$REQUEST" "$rc" "bridge worker exited without a response"
       fi
-      printf '%s %s\n' "$nonce" "$rc" >>"$BRIDGE_DIR/watcher.log"
+      printf '%s %s\n' "$nonce" "$rc" >"$BRIDGE_DIR/watcher.log.tmp.$$"
+      mv "$BRIDGE_DIR/watcher.log.tmp.$$" "$BRIDGE_DIR/watcher.log"
     fi
   fi
   sleep 0.05
