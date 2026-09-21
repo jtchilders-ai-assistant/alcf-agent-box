@@ -60,6 +60,7 @@ COPY scripts/red_shirt_gpu_rank_probe.py /opt/red-shirt-polaris/red_shirt_gpu_ra
 COPY scripts/red_shirt_toolchain_preflight.py /opt/red-shirt-polaris/red_shirt_toolchain_preflight.py
 COPY scripts/red_shirt_toolchain_stage.sh /opt/red-shirt-polaris/red_shirt_toolchain_stage.sh
 COPY scripts/red_shirt_toolchain_manifest.py /opt/red-shirt-polaris/red_shirt_toolchain_manifest.py
+COPY scripts/red_shirt_env_catalog.py /opt/red-shirt-polaris/red_shirt_env_catalog.py
 COPY scripts/red_shirt_entrypoint.sh /opt/red-shirt-polaris/entrypoint.sh
 COPY config/red-shirt-polaris/ /opt/red-shirt-polaris/config/
 COPY docs/polaris-snapshot/ /opt/red-shirt-polaris/docs/
@@ -74,6 +75,8 @@ RUN chmod 0555 \
       /opt/red-shirt-polaris/red_shirt_gpu_rank_probe.py \
       /opt/red-shirt-polaris/red_shirt_toolchain_stage.sh \
       /opt/red-shirt-polaris/red_shirt_toolchain_manifest.py \
+      /opt/red-shirt-polaris/red_shirt_env_catalog.py \
+    && /opt/hermes/.venv/bin/python -m py_compile /opt/red-shirt-polaris/red_shirt_env_catalog.py \
     && chown -R hermes:hermes /opt/red-shirt-polaris
 
 # Dedicated, non-root-readable mountpoint for the read-only secret/CA bind
@@ -85,6 +88,12 @@ RUN chmod 0555 \
 # /opt/data (the persistent HERMES_HOME bind target) -- so the read-only
 # secrets bind can never shadow either.
 RUN mkdir -p /mnt/secrets && chmod 0755 /mnt/secrets
+
+# Read-only mountpoint for the checksum-verified, attempt-local environment
+# catalog snapshot. The campaign binds the finalized site.sqlite here at
+# /environment/site.sqlite:ro. Apptainer refuses to bind onto paths absent
+# from the read-only SIF, so the directory must be pre-created in the image.
+RUN mkdir -p /environment && chmod 0755 /environment
 
 # Bake the source commit so the running agent can report unambiguous
 # provenance (CI passes ALCF_GIT_SHA=${{ github.sha }}; local builds default

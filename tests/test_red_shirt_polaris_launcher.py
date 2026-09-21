@@ -575,3 +575,193 @@ def test_pbs_preserves_signal_failure_status_on_sigterm(tmp_path):
         f"terminal.json must record a nonzero exit_code for a SIGTERM exit, got {payload}"
     )
     assert payload["pbs_job_id"] == job_id
+
+
+def test_campaign_verifies_catalog_through_a_bound_path():
+    """The pre-copy schema verification must expose the host catalog inside SIF."""
+    body = text(CAMPAIGN_PBS)
+    assert re.search(
+        r'apptainer.*exec.*--bind\s+"?\$RED_SHIRT_ENV_CATALOG:/environment/site\.sqlite:ro"?',
+        body,
+        re.DOTALL,
+    ), "catalog CLI cannot verify an unbound host path from inside the SIF"
+    assert re.search(
+        r'red_shirt_env_catalog\.py\s+verify\s+\\?\s*\n\s*--db\s+"?/environment/site\.sqlite"?',
+        body,
+    ), "campaign must use the catalog CLI's real --db interface"
+
+
+def test_campaign_reverify_does_not_reuse_wrong_basename_sidecar():
+    """A copied sidecar naming its source basename cannot verify site.sqlite."""
+    body = text(CAMPAIGN_PBS)
+    assert 'sha256sum -c "site.sqlite.sha256"' not in body
+    assert re.search(
+        r'red_shirt_env_catalog\.py\s+verify\s+\\?\s*\n\s*--db\s+"?/environment/site\.sqlite"?',
+        body,
+    )
+
+
+def test_campaign_facts_use_container_paths_and_real_catalog_status():
+    body = text(CAMPAIGN_PBS)
+    assert '"site_db":"/environment/site.sqlite"' in body.replace(" ", "")
+    assert '"overlay":overlay' in body.replace(" ", "")
+    assert '"collection_status":"see site db"' not in body
+    assert '"snapshot_id"' in body
+
+
+def test_main_agent_exec_binds_catalog_sidecar_read_only():
+    body = text(CAMPAIGN_PBS)
+    assert re.search(
+        r'--bind\s+"\$ENV_DIR/site\.sqlite\.sha256:/environment/site\.sqlite\.sha256:ro"',
+        body,
+    ), "observe requires the verified site sidecar inside the running container"
+
+
+# ---------------------------------------------------------------------------
+# Task 4: Environment-catalog image and campaign integration
+# ---------------------------------------------------------------------------
+
+def test_dockerfile_ships_env_catalog_cli():
+    """The image must copy red_shirt_env_catalog.py and mark it executable."""
+    body = text(DOCKERFILE)
+    # COPY into /opt/red-shirt-polaris/
+    assert re.search(
+        r"COPY\s+scripts/red_shirt_env_catalog\.py\s+/opt/red-shirt-polaris/red_shirt_env_catalog\.py",
+        body,
+    ), "Dockerfile must COPY scripts/red_shirt_env_catalog.py into /opt/red-shirt-polaris/"
+    # chmod 0555 must include the catalog CLI
+    chmod_block = re.search(r"RUN chmod 0555(.*?)(?:\n\n|\n[A-Z#])", body, re.DOTALL)
+    assert chmod_block and "red_shirt_env_catalog.py" in chmod_block.group(0), (
+        "Dockerfile must chmod 0555 red_shirt_env_catalog.py in the same RUN chmod block"
+    )
+
+
+def test_dockerfile_compiles_env_catalog_with_pinned_interpreter():
+    """The catalog CLI must be byte-compiled during image build using the Hermes venv interpreter."""
+    body = text(DOCKERFILE)
+    # Must compile with the pinned Hermes interpreter
+    assert re.search(
+        r"/opt/hermes/\.venv/bin/python\s+-m\s+py_compile\s+/opt/red-shirt-polaris/red_shirt_env_catalog\.py",
+        body,
+    ), (
+        "Dockerfile must compile red_shirt_env_catalog.py with "
+        "/opt/hermes/.venv/bin/python -m py_compile"
+    )
+
+
+def test_campaign_requires_env_catalog_and_sidecar():
+    """Campaign must fail closed if RED_SHIRT_ENV_CATALOG or its .sha256 are absent."""
+    body = text(CAMPAIGN_PBS)
+    assert "RED_SHIRT_ENV_CATALOG" in body, "campaign must reference RED_SHIRT_ENV_CATALOG"
+    # Must require the variable to be set (bash :? expansion or explicit check)
+    assert re.search(r"RED_SHIRT_ENV_CATALOG[}:]", body), (
+        "campaign must require RED_SHIRT_ENV_CATALOG to be set"
+    )
+    # Must verify the .sha256 sidecar exists
+    assert re.search(r'"\$\{?RED_SHIRT_ENV_CATALOG\}?"\.sha256|RED_SHIRT_ENV_CATALOG.*\.sha256', body), (
+        "campaign must verify the .sha256 sidecar for the catalog"
+    )
+
+
+def test_campaign_verifies_catalog_before_using_it():
+    """Campaign must run 'verify' on the catalog before copying or binding it."""
+    body = text(CAMPAIGN_PBS)
+    # verify sub-command or equivalent sha256sum check
+    assert "red_shirt_env_catalog.py" in body and (
+        "verify" in body or "sha256sum -c" in body
+    ), "campaign must invoke the catalog verify command before using it"
+    # verify must precede the copy step
+    if "verify" in body:
+        idx_verify = body.index("verify")
+        # Some copy into $ATTEMPT must follow
+        assert re.search(r"\$ATTEMPT/environment", body[idx_verify:]), (
+            "catalog verify must precede the copy into $ATTEMPT/environment"
+        )
+
+
+def test_campaign_copies_catalog_into_attempt_mode_0444():
+    """Campaign must copy the catalog DB and sidecar into $ATTEMPT/environment/ at mode 0444."""
+    body = text(CAMPAIGN_PBS)
+    assert re.search(r"\$ATTEMPT/environment", body), (
+        "campaign must copy catalog into $ATTEMPT/environment/"
+    )
+    # install -m 0444 or chmod 0444 after copy
+    assert re.search(r"(?:install\s+-m\s+0444|chmod\s+0444)", body), (
+        "campaign must set the catalog copy to mode 0444"
+    )
+
+
+def test_campaign_reverifies_catalog_copy():
+    """Campaign must re-verify the catalog after copying to detect copy errors."""
+    body = text(CAMPAIGN_PBS)
+    # Must have two separate checksum/verify invocations
+    verify_count = body.count("sha256sum -c")
+    verify_cmd_count = len(re.findall(r"red_shirt_env_catalog.*verify", body))
+    total_verify = verify_count + verify_cmd_count
+    assert total_verify >= 2, (
+        "campaign must re-verify the catalog copy (at least two checksum checks): "
+        f"found {total_verify}"
+    )
+
+
+def test_campaign_binds_attempt_catalog_read_only():
+    """Campaign must bind the attempt catalog copy as read-only inside the SIF."""
+    body = text(CAMPAIGN_PBS)
+    assert re.search(r"/environment/site\.sqlite.*:ro|:ro.*site\.sqlite", body), (
+        "campaign must bind the catalog at /environment/site.sqlite:ro inside the SIF"
+    )
+
+
+def test_campaign_provides_writable_overlay_path():
+    """Campaign must create and expose a writable overlay path through the attempt bind."""
+    body = text(CAMPAIGN_PBS)
+    assert re.search(r"environment.*overlay|overlay.*environment", body, re.IGNORECASE), (
+        "campaign must set up a writable overlay path under the attempt"
+    )
+
+
+def test_campaign_exports_catalog_paths_and_facts():
+    """Campaign must export catalog paths and add environment_catalog entry to facts.json."""
+    body = text(CAMPAIGN_PBS)
+    # The facts.json inline Python or heredoc must include environment_catalog
+    assert "environment_catalog" in body, (
+        "campaign must include 'environment_catalog' in facts.json"
+    )
+    # Must include the explicit epistemic marker
+    assert "discovery_only_not_compatibility_proof" in body, (
+        "campaign must include 'discovery_only_not_compatibility_proof' in facts.json"
+    )
+    # Must record site_checksum or collection_status
+    assert re.search(r"site_checksum|collection_status|site_sha256", body), (
+        "campaign must record site_checksum or collection_status in environment_catalog facts"
+    )
+
+
+def test_campaign_facts_no_secrets_from_catalog():
+    """Catalog-related facts must not carry credentials or raw environment dumps."""
+    body = text(CAMPAIGN_PBS)
+    # Specifically no APPTAINERENV_ assignments containing catalog-derived token/secret shapes
+    catalog_env_section = re.search(
+        r"environment_catalog.*?(?=\n\n|\nPY\b|EOF)",
+        body,
+        re.DOTALL,
+    )
+    if catalog_env_section:
+        section = catalog_env_section.group(0)
+        assert not re.search(r"(?:token|password|secret|private_key|bearer)", section, re.I), (
+            "environment_catalog facts must not contain credential-shaped values"
+        )
+
+
+def test_dockerfile_bind_destinations_include_environment():
+    """If the campaign binds /environment, the Dockerfile must create that mountpoint."""
+    # The campaign binds site.sqlite at /environment/site.sqlite.
+    # Apptainer refuses to bind onto a path absent from the read-only SIF.
+    # The Dockerfile must therefore create /environment as a mountpoint.
+    body_campaign = text(CAMPAIGN_PBS)
+    if "/environment/site.sqlite" in body_campaign:
+        body_df = text(DOCKERFILE)
+        assert re.search(r"mkdir\s+(-p\s+)?/environment\b", body_df), (
+            "Dockerfile must create /environment mountpoint for the catalog bind "
+            "(campaign binds /environment/site.sqlite:ro)"
+        )

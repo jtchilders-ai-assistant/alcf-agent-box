@@ -114,7 +114,125 @@ executable sanity check — a build that produces a broken image fails here
 rather than at job runtime. If the PBS-side `sha256sum -c` check ever fails,
 discard both files and rebuild rather than trusting a partial artifact.
 
-## 3. Submit
+## 3. Collect and stage the environment catalog
+
+The Pepper campaign requires a pre-collected, finalized site catalog
+(`RED_SHIRT_ENV_CATALOG`) that Red Shirt uses for module and software path
+discovery. There is no daemon, container, or network dependency — the catalog
+is a read-only SQLite file produced on the Polaris login node.
+
+### Collect a broad site snapshot
+
+```bash
+# Broad collection: discover up to 200 modules, 30-second per-command timeout.
+# Run from an initialized Polaris login shell so LMOD_CMD and MODULEPATH exist.
+python3 scripts/red_shirt_env_catalog.py collect \
+  --output "$HOME/red-shirt-polaris/catalog/polaris-site.sqlite" \
+  --system polaris \
+  --source-id "$(hostname)-$(date -u +%Y%m%dT%H%M%SZ)" \
+  --discover-modules \
+  --module-limit 200 \
+  --command-timeout 30
+```
+
+### Deepen selected modules (optional)
+
+`collect` creates a new snapshot; it does not append to an existing database.
+Use a separate output for a focused/deeper profile:
+
+```bash
+python3 scripts/red_shirt_env_catalog.py collect \
+  --output "$HOME/red-shirt-polaris/catalog/polaris-toolchain.sqlite" \
+  --system polaris \
+  --source-id "$(hostname)-deepen-$(date -u +%Y%m%dT%H%M%SZ)" \
+  --module PrgEnv-gnu --module cray-mpich --module cuda/12.4 --module kokkos/4.4.01
+```
+
+### Finalize and verify
+
+```bash
+# Finalize: runs integrity checks, writes .sha256 sidecar, chmod 0444.
+python3 scripts/red_shirt_env_catalog.py finalize \
+  --db "$HOME/red-shirt-polaris/catalog/polaris-site.sqlite"
+
+# Verify (can be re-run any time; read-only).
+python3 scripts/red_shirt_env_catalog.py verify \
+  --db "$HOME/red-shirt-polaris/catalog/polaris-site.sqlite"
+```
+
+The `finalize` step writes a `polaris-site.sqlite.sha256` sidecar next to the
+database. Both files must be present when `RED_SHIRT_ENV_CATALOG` is set.
+
+### Stage to campaign tools
+
+```bash
+# Both the DB and sidecar must be accessible from the campaign PBS job.
+install -m 0444 "$HOME/red-shirt-polaris/catalog/polaris-site.sqlite" \
+  "$HOME/red-shirt-polaris/campaign-tools/polaris-site.sqlite"
+install -m 0444 "$HOME/red-shirt-polaris/catalog/polaris-site.sqlite.sha256" \
+  "$HOME/red-shirt-polaris/campaign-tools/polaris-site.sqlite.sha256"
+```
+
+### Submit Pepper campaign with catalog
+
+```bash
+export SIF="$HOME/red-shirt-polaris/red-shirt-polaris-<tag>.sif"
+export RED_SHIRT_ENV_CATALOG="$HOME/red-shirt-polaris/campaign-tools/polaris-site.sqlite"
+qsub -A datascience deploy/polaris/red-shirt-pepper-campaign.pbs
+```
+
+The campaign verifies the catalog and its sidecar, copies them into the
+attempt directory at mode `0444`, re-verifies the copy, and binds the snapshot
+read-only at `/environment/site.sqlite` inside the SIF. A writable overlay
+path is passed through the attempt bind for Red Shirt to record observations.
+
+### Query from inside Red Shirt
+
+Inside the SIF, Red Shirt can query the catalog through the bundled CLI:
+
+```bash
+# FTS search across module names and descriptions
+/opt/red-shirt-polaris/red_shirt_env_catalog.py search --db /environment/site.sqlite \
+  --query "kokkos"
+
+# Show dependencies for a module
+/opt/red-shirt-polaris/red_shirt_env_catalog.py dependencies --db /environment/site.sqlite \
+  --name kokkos/4.4.01
+
+# Status/completeness summary
+/opt/red-shirt-polaris/red_shirt_env_catalog.py status --db /environment/site.sqlite
+
+# Record a structured attempt observation. --input is the JSON object itself;
+# evidence_path must be an existing absolute file beneath --attempt-root.
+EVIDENCE="$TASK_ROOT/evidence/configure.log"
+DIGEST="$(sha256sum "$EVIDENCE" | cut -d' ' -f1)"
+PAYLOAD="$(python3 - "$EVIDENCE" "$DIGEST" "$RED_SHIRT_ENV_PROFILE_ID" <<'PY'
+import json, sys
+path, digest, profile = sys.argv[1:]
+print(json.dumps({
+    "subject": "pepper-configure", "kind": "command",
+    "claim": "Pepper configured", "evidence_level": "detected",
+    "outcome": "success", "evidence_path": path,
+    "evidence_sha256": digest, "command_exit_code": 0,
+    "env_profile_id": profile,
+}, separators=(",", ":")))
+PY
+)"
+/opt/red-shirt-polaris/red_shirt_env_catalog.py observe \
+  --site /environment/site.sqlite \
+  --overlay "$RED_SHIRT_ENV_CATALOG_OVERLAY" \
+  --attempt-root "$TASK_ROOT" \
+  --input "$PAYLOAD"
+```
+
+### Refresh a stale snapshot
+
+If the catalog predates a site maintenance window or module upgrade, collect
+a fresh snapshot and re-finalize before the next campaign attempt. The
+campaign enforces a fresh checksum on every attempt and rejects an
+unfinalized or checksum-mismatched catalog.
+
+## 4. Submit
 
 The project is supplied explicitly on the command line — PBS does not
 expand shell variables inside `#PBS` directives, so the launcher never
@@ -211,7 +329,7 @@ application dependencies and executes the preflight before configuring/building
 Pepper. Attempt evidence is retained under
 `$HOME/red-shirt-polaris/home/campaigns/pepper-gpu-8rank/attempts/<NNN>/`.
 
-## 4. Monitor
+## 5. Monitor
 
 ```bash
 qstat -xf "$JOBID"

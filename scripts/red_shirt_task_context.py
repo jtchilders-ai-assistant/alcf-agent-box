@@ -69,6 +69,41 @@ def agents_document(task_root, facts):
     action_lines = "\n".join("- `%s`" % action for action in actions)
     if not action_lines:
         action_lines = "- No bridge actions were declared; stop and report this context defect."
+
+    catalog = facts.get("environment_catalog", {}) if isinstance(facts, dict) else {}
+    if catalog and isinstance(catalog, dict):
+        site_db = catalog.get("site_db", "unknown")
+        overlay = catalog.get("overlay", "unknown")
+        query_cli = catalog.get("query_cli", "/opt/red-shirt-polaris/red_shirt_env_catalog.py")
+        catalog_section = """
+## Environment catalog
+
+The site has a pre-collected, finalized module and software snapshot at:
+
+- **Site DB (read-only):** `{site_db}`
+- **Overlay (writable):** `{overlay}`
+- **Query CLI:** `{query_cli}`
+
+### Using the catalog
+
+1. **Discovery only** — the catalog is a snapshot, not a compatibility proof.
+   Its epistemic status is `discovery_only_not_compatibility_proof`. Compiled/link evidence
+   and runtime evidence remain authoritative over catalog records.
+2. **Freshness and completeness** — the snapshot reflects the collection time only.
+   Module versions, paths, and availability may have changed. Partial collection is
+   labeled incomplete; incomplete records must not be promoted to absent dependencies.
+3. **Provenance** — each record carries the command that produced it. Inspect provenance
+   before trusting a path or version.
+4. **Contradictions** — contradictory observations (e.g., a module that succeeds in
+   one probe and fails in another) must coexist in the overlay. Never overwrite or
+   erase conflicting evidence; record both and note the conflict in `STATUS.json`.
+5. **Structured observations** — record attempt-specific build, load, and run results
+   as structured observations in the overlay DB using `{query_cli} observe --overlay`.
+   Include evidence path, SHA-256, exit code, and outcome kind for every decisive probe.
+""".format(site_db=site_db, overlay=overlay, query_cli=query_cli)
+    else:
+        catalog_section = ""
+
     return """<!-- {marker} -->
 # Red Shirt Attempt Contract
 
@@ -124,14 +159,19 @@ Keep these claims separate:
 
 Contradictory evidence blocks success. Preserve the first unresolved failure.
 Do not infer numerical results that are absent from retained raw output.
-
+{catalog_section}
 ## Completion contract
 
 Before exit, always write `REPORT.md` and `RESULT.json`, then write exactly one of `DONE` or `FAILED`.
 `DONE` is permitted only when every task acceptance gate
 has passed. Otherwise write `FAILED` with the current phase, first unresolved
 failure, completed evidence, and next action.
-""".format(marker=GENERATED_MARKER, task_root=task_root, action_lines=action_lines)
+""".format(
+        marker=GENERATED_MARKER,
+        task_root=task_root,
+        action_lines=action_lines,
+        catalog_section=catalog_section,
+    )
 
 
 def env_document(facts):

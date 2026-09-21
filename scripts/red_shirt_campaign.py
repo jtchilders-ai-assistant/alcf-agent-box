@@ -155,7 +155,7 @@ def run(args):
     try:
         try:
             token = run_checked(
-                [str(args.token_helper), "get_access_token", "--service", "inference"],
+                [sys.executable, str(args.token_helper), "get_access_token", "--service", "inference"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -173,6 +173,7 @@ def run(args):
         with smoke_path.open("w", encoding="utf-8") as smoke:
             probe = run_checked(
                 [
+                    sys.executable,
                     str(args.probe),
                     "inference",
                     "--base-url", args.base_url,

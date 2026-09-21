@@ -40,6 +40,7 @@ def run_campaign(
     hermes_sleep=0,
     hermes_timeout=20,
     hermes_child_sleep=0,
+    python_helpers_executable=True,
 ):
     task = tmp_path / "task"
     runtime = tmp_path / "runtime"
@@ -59,6 +60,8 @@ if {token_rc} == 0:
 raise SystemExit({token_rc})
 """)
     detail = probe_detail or ("success" if probe_rc == 0 else "unexpected HTTP status 401")
+    if not python_helpers_executable:
+        token_helper.chmod(0o644)
     probe = executable(tmp_path / "probe", f"""
 import json, os, pathlib, sys
 args=sys.argv[1:]
@@ -68,6 +71,8 @@ assert token_path.read_text().strip() == {secret!r}
 print(json.dumps({{"step": "inference", "ok": {str(probe_rc == 0)}, "detail": {detail!r}}}))
 raise SystemExit({probe_rc})
 """)
+    if not python_helpers_executable:
+        probe.chmod(0o644)
     hermes_body = f"""
 import json, os, pathlib, sys, time
 root=pathlib.Path.cwd()
@@ -127,6 +132,19 @@ def test_campaign_refreshes_smokes_generates_context_then_runs_hermes(tmp_path):
     assert not (task / "FAILED").exists()
     combined = result.stdout + result.stderr + (runtime / "inference-smoke.json").read_text()
     assert secret not in combined
+    assert not (runtime / "inference.token").exists()
+
+
+def test_campaign_runs_packaged_python_helpers_without_execute_bits(tmp_path):
+    result, task, runtime, events, secret = run_campaign(
+        tmp_path,
+        python_helpers_executable=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert events.read_text().splitlines() == ["probe", "hermes"]
+    assert (task / "DONE").is_file()
+    assert secret not in result.stdout + result.stderr
     assert not (runtime / "inference.token").exists()
 
 

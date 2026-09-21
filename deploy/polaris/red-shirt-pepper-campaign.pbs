@@ -22,6 +22,8 @@ LEDGER="$CAMPAIGN_ROOT/attempt-ledger"
 LOCK_FILE="$CAMPAIGN_ROOT/attempt-ledger.lock"
 TOOLS="$BASE_DIR/campaign-tools"
 MPI_ENV_HELPER="${MPI_ENV_HELPER:-$TOOLS/red_shirt_mpi_env.sh}"
+# Operator must stage a finalized, verified site catalog (see RED_SHIRT_README.md).
+RED_SHIRT_ENV_CATALOG="${RED_SHIRT_ENV_CATALOG:?Set RED_SHIRT_ENV_CATALOG to the finalized site.sqlite path}"
 ATTEMPT=""
 WATCHER_PID=""
 RUN8_LAUNCHER=""
@@ -174,17 +176,90 @@ python3 "$TOOLS/red_shirt_toolchain_manifest.py" \
   --attempt-root "$ATTEMPT" --stage-probe "$ATTEMPT/red_shirt_toolchain_stage.sh" \
   --output "$ATTEMPT/toolchain-manifest.json"
 
-python3 - "$RUNTIME/facts.json" "$RED_SHIRT_ENV_PROFILE_ID" "$BRIDGE" "$TASK" "$RUNTIME" "$ATTEMPT" <<'PY'
+# ---------------------------------------------------------------------------
+# Environment catalog staging: verify operator-provided site snapshot, copy
+# both the DB and its .sha256 sidecar into $ATTEMPT/environment/ at mode 0444,
+# then re-verify the copy to detect copy errors. The catalog is a finalized,
+# immutable site snapshot — no daemon, no network dependency.
+# ---------------------------------------------------------------------------
+test -r "$RED_SHIRT_ENV_CATALOG" || { printf 'ERROR: missing catalog: %s\n' "$RED_SHIRT_ENV_CATALOG" >&2; exit 1; }
+test -r "${RED_SHIRT_ENV_CATALOG}.sha256" || { printf 'ERROR: missing catalog sidecar: %s.sha256\n' "$RED_SHIRT_ENV_CATALOG" >&2; exit 1; }
+# Verify the operator-provided catalog against its sidecar before copying.
+(cd "$(dirname "$RED_SHIRT_ENV_CATALOG")" && sha256sum -c "$(basename "$RED_SHIRT_ENV_CATALOG").sha256") \
+  || { printf 'ERROR: catalog checksum mismatch: %s\n' "$RED_SHIRT_ENV_CATALOG" >&2; exit 1; }
+# Use the in-image catalog CLI to cross-check schema/completeness. Bind both
+# source files under their canonical basename so verify sees the matching
+# sidecar and never relies on host paths existing inside the SIF.
+"$HOST_APPTAINER" exec --cleanenv \
+  --bind "$RED_SHIRT_ENV_CATALOG:/environment/site.sqlite:ro" \
+  --bind "${RED_SHIRT_ENV_CATALOG}.sha256:/environment/site.sqlite.sha256:ro" \
+  "$SIF" /opt/hermes/.venv/bin/python \
+  /opt/red-shirt-polaris/red_shirt_env_catalog.py verify \
+  --db /environment/site.sqlite \
+  || { printf 'ERROR: catalog verify failed: %s\n' "$RED_SHIRT_ENV_CATALOG" >&2; exit 1; }
+ENV_DIR="$ATTEMPT/environment"
+ENV_OVERLAY="$ATTEMPT/environment-overlay"
+mkdir -p "$ENV_DIR" "$ENV_OVERLAY"
+# Checksum-safe copy: install preserves bytes, then we verify both copies.
+install -m 0444 "$RED_SHIRT_ENV_CATALOG" "$ENV_DIR/site.sqlite"
+install -m 0444 "${RED_SHIRT_ENV_CATALOG}.sha256" "$ENV_DIR/site.sqlite.sha256"
+# Chmod 0444 for certainty even when install is used.
+chmod 0444 "$ENV_DIR/site.sqlite" "$ENV_DIR/site.sqlite.sha256"
+# Re-verify the copied DB with its expected digest and through the in-image
+# schema/status verifier. The copied sidecar's filename field may name the
+# operator source, so do not pass it directly to sha256sum -c after renaming.
+ENV_CATALOG_SHA256="$(sha256sum "$ENV_DIR/site.sqlite" | cut -d' ' -f1)"
+ORIG_SHA256="$(awk 'NF {print $1; exit}' "${RED_SHIRT_ENV_CATALOG}.sha256")"
+case "$ORIG_SHA256" in
+  [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;;
+  *) printf 'ERROR: malformed catalog sidecar digest\n' >&2; exit 1;;
+esac
+[ "${#ORIG_SHA256}" -eq 64 ] \
+  || { printf 'ERROR: malformed catalog sidecar digest length\n' >&2; exit 1; }
+[ "$ENV_CATALOG_SHA256" = "$ORIG_SHA256" ] \
+  || { printf 'ERROR: catalog copy checksum mismatch\n' >&2; exit 1; }
+printf '%s  site.sqlite\n' "$ENV_CATALOG_SHA256" >"$ENV_DIR/site.sqlite.sha256.tmp"
+chmod 0444 "$ENV_DIR/site.sqlite.sha256.tmp"
+mv -f "$ENV_DIR/site.sqlite.sha256.tmp" "$ENV_DIR/site.sqlite.sha256"
+"$HOST_APPTAINER" exec --cleanenv \
+  --bind "$ENV_DIR/site.sqlite:/environment/site.sqlite:ro" \
+  --bind "$ENV_DIR/site.sqlite.sha256:/environment/site.sqlite.sha256:ro" \
+  "$SIF" /opt/hermes/.venv/bin/python \
+  /opt/red-shirt-polaris/red_shirt_env_catalog.py verify \
+  --db /environment/site.sqlite \
+  || { printf 'ERROR: copied catalog schema/status verification failed\n' >&2; exit 1; }
+ENV_CATALOG_STATUS_JSON="$("$HOST_APPTAINER" exec --cleanenv \
+  --bind "$ENV_DIR/site.sqlite:/environment/site.sqlite:ro" \
+  "$SIF" /opt/hermes/.venv/bin/python \
+  /opt/red-shirt-polaris/red_shirt_env_catalog.py status \
+  --db /environment/site.sqlite)"
+ENV_CATALOG_SNAPSHOT_ID="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["snapshot_id"])' <<<"$ENV_CATALOG_STATUS_JSON")"
+ENV_CATALOG_COLLECTION_STATUS="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["collection_status"])' <<<"$ENV_CATALOG_STATUS_JSON")"
+
+python3 - "$RUNTIME/facts.json" "$RED_SHIRT_ENV_PROFILE_ID" "$BRIDGE" "$TASK" "$RUNTIME" "$ATTEMPT" \
+  "$ENV_CATALOG_SHA256" "$ENV_OVERLAY" "$ENV_CATALOG_SNAPSHOT_ID" "$ENV_CATALOG_COLLECTION_STATUS" <<'PY'
 import json,pathlib,sys
-out,profile,bridge,task,runtime,attempt=sys.argv[1:]
-payload={"environment_profile_id":profile,"allocation":{"ranks":8,"hosts":2,"gpus_per_host":4},
-         "bridge":{"directory":bridge,"client":"/opt/red-shirt-polaris/red_shirt_host_client.sh",
-                   "actions":["env_report","run_script","run8"]},
-         "writable_roots":[task,runtime],
-         "toolchain_preflight":{"manifest":attempt+"/toolchain-manifest.json",
-                                "runner":attempt+"/red_shirt_toolchain_preflight.py",
-                                "output":runtime+"/preflight/toolchain-preflight.json",
-                                "status":"not_run"}}
+out,profile,bridge,task,runtime,attempt,site_sha256,overlay,snapshot_id,collection_status=sys.argv[1:]
+payload={
+    "environment_profile_id":profile,
+    "allocation":{"ranks":8,"hosts":2,"gpus_per_host":4},
+    "bridge":{"directory":bridge,"client":"/opt/red-shirt-polaris/red_shirt_host_client.sh",
+              "actions":["env_report","run_script","run8"]},
+    "writable_roots":[task,runtime],
+    "toolchain_preflight":{"manifest":attempt+"/toolchain-manifest.json",
+                           "runner":attempt+"/red_shirt_toolchain_preflight.py",
+                           "output":runtime+"/preflight/toolchain-preflight.json",
+                           "status":"not_run"},
+    "environment_catalog":{
+        "site_db":"/environment/site.sqlite",
+        "site_sha256":site_sha256,
+        "snapshot_id":snapshot_id,
+        "overlay":overlay,
+        "query_cli":"/opt/red-shirt-polaris/red_shirt_env_catalog.py",
+        "collection_status":collection_status,
+        "epistemic_status":"discovery_only_not_compatibility_proof",
+    },
+}
 pathlib.Path(out).write_text(json.dumps(payload,indent=2,sort_keys=True)+"\n")
 PY
 
@@ -193,10 +268,15 @@ export APPTAINERENV_HTTP_PROXY=http://proxy.alcf.anl.gov:3128
 export APPTAINERENV_HTTPS_PROXY="$APPTAINERENV_HTTP_PROXY"
 export APPTAINERENV_RED_SHIRT_BRIDGE_DIR="$BRIDGE"
 export APPTAINERENV_RED_SHIRT_ENV_PROFILE_ID="$RED_SHIRT_ENV_PROFILE_ID"
+# Expose the read-only site catalog and the writable attempt overlay path.
+export APPTAINERENV_RED_SHIRT_ENV_CATALOG_SITE="/environment/site.sqlite"
+export APPTAINERENV_RED_SHIRT_ENV_CATALOG_OVERLAY="$ENV_OVERLAY"
 
 "$HOST_APPTAINER" exec --cleanenv \
   --bind "$HERMES_HOME_DIR:/opt/data" --bind "$ATTEMPT:$ATTEMPT" \
   --bind "$BASE_DIR:$BASE_DIR" \
+  --bind "$ENV_DIR/site.sqlite:/environment/site.sqlite:ro" \
+  --bind "$ENV_DIR/site.sqlite.sha256:/environment/site.sqlite.sha256:ro" \
   "$SIF" python3 /opt/red-shirt-polaris/red_shirt_campaign.py \
     --task-root "$TASK" --runtime-root "$RUNTIME" \
     --facts-json "$RUNTIME/facts.json" \
