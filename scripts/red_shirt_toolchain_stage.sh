@@ -78,7 +78,7 @@ EOF
 
   cuda_runtime_compatibility)
     NVCC="${RED_SHIRT_NVCC:?RED_SHIRT_NVCC is required}"
-    MPI_LINK_PROBE="${RED_SHIRT_MPI_LINK_PROBE:?RED_SHIRT_MPI_LINK_PROBE is required}"
+    MPI_LINK_PROBE="$WORK/mpi_gtl_link_resolution/mpi_link_probe"
     require_exec "$MPI_LINK_PROBE"
     "$NVCC" --version
     ldd "$MPI_LINK_PROBE" | tee mpi-cuda.ldd
@@ -108,29 +108,35 @@ PY
   kokkos_required_features)
     KOKKOS_PREFIX="${RED_SHIRT_KOKKOS_PREFIX:?RED_SHIRT_KOKKOS_PREFIX is required}"
     CMAKE="${RED_SHIRT_CMAKE:-cmake}"
+    cat >feature_compile.cpp <<'EOF'
+#include <Kokkos_Core.hpp>
+#ifndef KOKKOS_ENABLE_CUDA
+#error KOKKOS_ENABLE_CUDA is required
+#endif
+#ifndef KOKKOS_ENABLE_CUDA_LAMBDA
+#error KOKKOS_ENABLE_CUDA_LAMBDA is required
+#endif
+#ifndef KOKKOS_ENABLE_CUDA_CONSTEXPR
+#error KOKKOS_ENABLE_CUDA_CONSTEXPR is required
+#endif
+#ifndef KOKKOS_ARCH_AMPERE80
+#error KOKKOS_ARCH_AMPERE80 is required
+#endif
+int main() { return 0; }
+EOF
     cat >CMakeLists.txt <<'EOF'
 cmake_minimum_required(VERSION 3.20)
 project(kokkos_features LANGUAGES CXX CUDA)
 find_package(Kokkos CONFIG REQUIRED)
-string(TOUPPER "${Kokkos_DEVICES}" _devices)
-string(TOUPPER "${Kokkos_ARCH}" _arch)
-string(TOUPPER "${Kokkos_OPTIONS}" _options)
-if(NOT _devices MATCHES "CUDA")
-  message(FATAL_ERROR "Kokkos_ENABLE_CUDA missing: devices=${Kokkos_DEVICES}")
-endif()
-if(NOT _arch MATCHES "AMPERE80")
-  message(FATAL_ERROR "Kokkos_ARCH_AMPERE80 missing: arch=${Kokkos_ARCH}")
-endif()
-if(NOT _options MATCHES "CUDA_LAMBDA")
-  message(FATAL_ERROR "Kokkos_ENABLE_CUDA_LAMBDA missing: options=${Kokkos_OPTIONS}")
-endif()
-if(NOT _options MATCHES "CUDA_CONSTEXPR")
-  message(FATAL_ERROR "Kokkos_ENABLE_CUDA_CONSTEXPR missing: options=${Kokkos_OPTIONS}")
-endif()
+add_executable(kokkos_feature_compile feature_compile.cpp)
+target_link_libraries(kokkos_feature_compile PRIVATE Kokkos::kokkos)
+target_compile_features(kokkos_feature_compile PRIVATE cxx_std_20)
 get_target_property(_defs Kokkos::kokkos INTERFACE_COMPILE_DEFINITIONS)
-file(WRITE "${CMAKE_BINARY_DIR}/kokkos-features.txt" "devices=${Kokkos_DEVICES}\narch=${Kokkos_ARCH}\noptions=${Kokkos_OPTIONS}\ndefinitions=${_defs}\n")
+file(WRITE "${CMAKE_BINARY_DIR}/kokkos-features.txt" "definitions=${_defs}\n")
 EOF
     "$CMAKE" -S . -B build -DCMAKE_PREFIX_PATH="$KOKKOS_PREFIX"
+    "$CMAKE" --build build --parallel "${RED_SHIRT_BUILD_JOBS:-8}"
+    ./build/kokkos_feature_compile
     cat build/kokkos-features.txt
     ;;
 
@@ -153,11 +159,21 @@ EOF
 #include <Kokkos_Core.hpp>
 #include <mpi.h>
 #include <cstdio>
+#include <fstream>
+#include <string>
 int main(int argc, char **argv) {
   MPI_Init(&argc, &argv); int rank=-1; MPI_Comm_rank(MPI_COMM_WORLD, &rank);
   Kokkos::initialize(argc, argv); long value=0;
   Kokkos::parallel_reduce("probe", 1024, KOKKOS_LAMBDA(int, long& x){x+=1;}, value);
-  Kokkos::fence(); std::printf("KOKKOS_PROBE rank=%d value=%ld\n", rank, value);
+  Kokkos::fence();
+  if (rank == 0) {
+    std::ifstream maps("/proc/self/maps"); std::string line;
+    while (std::getline(maps, line)) {
+      if (line.find("mpi") != std::string::npos || line.find("gtl") != std::string::npos ||
+          line.find("cuda") != std::string::npos) std::printf("LOADED_LIB %s\n", line.c_str());
+    }
+  }
+  std::printf("KOKKOS_PROBE rank=%d value=%ld\n", rank, value);
   Kokkos::finalize(); MPI_Finalize(); return value == 1024 ? 0 : 4;
 }
 EOF
@@ -168,8 +184,13 @@ EOF
 import re
 text=open('production-run.log').read()
 records=re.findall(r'KOKKOS_PROBE rank=(\d+) value=(\d+)', text)
-assert {int(r) for r,v in records} == set(range(8)), records
+expected=int(__import__('os').environ.get('RED_SHIRT_EXPECTED_RANKS', '8'))
+assert {int(r) for r,v in records} == set(range(expected)), records
 assert {int(v) for r,v in records} == {1024}, records
+loaded=[line for line in text.splitlines() if line.startswith('LOADED_LIB ')]
+assert any('mpi' in line.lower() for line in loaded), loaded
+assert any('gtl' in line.lower() for line in loaded), loaded
+assert any('cuda' in line.lower() for line in loaded), loaded
 PY
     ;;
 

@@ -78,6 +78,11 @@ def test_probe_contains_real_stage_acceptance_operations():
         "Kokkos_ARCH_AMPERE80",
         "Kokkos::kokkos",
         "Kokkos::parallel_reduce",
+        "KOKKOS_ENABLE_CUDA",
+        "KOKKOS_ENABLE_CUDA_LAMBDA",
+        "KOKKOS_ENABLE_CUDA_CONSTEXPR",
+        "KOKKOS_ARCH_AMPERE80",
+        "mpi_gtl_link_resolution/mpi_link_probe",
         "PEPPER_MPI_DISABLED",
         "CMakeCache.txt",
     )
