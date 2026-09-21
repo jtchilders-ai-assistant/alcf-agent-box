@@ -177,6 +177,27 @@ host file, module list, versions, link audit, rank placement, and terminal
 record, is written beneath
 `$HOME/red-shirt-polaris/home/runs/<PBS_JOBID>/mpi-acceptance/`.
 
+### Bounded autonomous Pepper campaign
+
+Stage the image-managed campaign tools under `$HOME/red-shirt-polaris/campaign-tools/`
+from the exact merged revision, preserving executable modes. Then submit the dedicated
+one-shot launcher with a reviewed instance wrapper that exports only non-secret paths
+(`SIF`, and optional `MAX_ATTEMPTS`/`HERMES_TIMEOUT`); do not use `qsub -v` for
+credentials:
+
+```bash
+qsub -A datascience deploy/polaris/red-shirt-pepper-campaign.pbs
+```
+
+The launcher allocates exactly two nodes, verifies the pinned SIF checksum,
+serializes attempts through `attempt-ledger.lock`, defaults to one total attempt,
+starts the correlated host watcher, generates attempt-local context and the ordered
+seven-stage preflight contract, refreshes and smokes inference, and invokes the
+bounded campaign wrapper. Red Shirt—not the launcher—selects and installs candidate
+application dependencies and executes the preflight before configuring/building
+Pepper. Attempt evidence is retained under
+`$HOME/red-shirt-polaris/home/campaigns/pepper-gpu-8rank/attempts/<NNN>/`.
+
 ## 4. Monitor
 
 ```bash

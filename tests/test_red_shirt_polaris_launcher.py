@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DEPLOY = ROOT / "deploy" / "polaris"
 BUILD = DEPLOY / "build-red-shirt-sif.sh"
 PBS = DEPLOY / "red-shirt-polaris.pbs"
+CAMPAIGN_PBS = DEPLOY / "red-shirt-pepper-campaign.pbs"
 README = DEPLOY / "RED_SHIRT_README.md"
 DOCKERFILE = ROOT / "Dockerfile.red-shirt-polaris"
 
@@ -37,6 +38,37 @@ def text(path: Path) -> str:
 # ---------------------------------------------------------------------------
 # Existence + syntax
 # ---------------------------------------------------------------------------
+
+def test_campaign_launcher_wires_reviewed_attempt_contract():
+    body = text(CAMPAIGN_PBS)
+    required = (
+        "red_shirt_task_context.py",
+        "red_shirt_campaign.py",
+        "red_shirt_host_watcher.sh",
+        "red_shirt_toolchain_manifest.py",
+        "red_shirt_toolchain_preflight.py",
+        "pepper-gpu-8rank.md",
+        "--hermes-timeout",
+        "RED_SHIRT_ENV_PROFILE_ID",
+        "RED_SHIRT_EXPECTED_RANKS=8",
+        "RED_SHIRT_EXPECTED_HOSTS=2",
+    )
+    for fragment in required:
+        assert fragment in body
+    assert "#PBS -l select=2:system=polaris" in body
+    assert "#PBS -A" not in body
+    assert "qsub -v" not in body
+    assert "flock -n" in body
+    assert "attempt-ledger" in body
+    assert "MAX_ATTEMPTS" in body
+    assert "sha256sum -c" in body
+    assert "trap" in body and "TERM" in body
+    assert 'python3 "$TOOLS/red_shirt_toolchain_preflight.py"' not in body
+    assert 'RED_SHIRT_KOKKOS_PREFIX:?' not in body
+    assert 'RED_SHIRT_PEPPER_SOURCE:?' not in body
+    assert 'RED_SHIRT_PEPPER_CACHE_INIT:?' not in body
+    assert 'run.ini' in body
+
 
 def test_files_exist():
     for path in (BUILD, PBS, README):

@@ -74,8 +74,13 @@ def agents_document(task_root, facts):
 
 Task root: `{task_root}`
 
-Read `ENV.md` before acting. It records observed environment facts, not proof
-that an application will configure, compile, link, or run successfully.
+- Read `ENV.md` before acting. It records observed environment facts, not proof
+  that an application will configure, compile, link, or run successfully.
+- If `ENV.md` declares a `toolchain_preflight` manifest and runner, select and
+  install candidate dependencies first, export the required `RED_SHIRT_*`
+  paths for that exact candidate stack, then invoke the runner through the
+  declared `run_script` bridge action. A failed or missing preflight blocks
+  application configure/build/run success; preserve its complete evidence.
 
 ## Scope and ownership
 
