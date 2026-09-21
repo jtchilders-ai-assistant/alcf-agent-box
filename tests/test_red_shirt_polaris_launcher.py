@@ -187,6 +187,9 @@ def test_build_uses_local_scratch_and_bounded_squashfs():
 
 def test_build_scratch_dirs_are_job_scoped_and_removed():
     body = text(BUILD)
+    assert "SCRATCH_BASE" in body
+    assert 'if mkdir -p "$LOCAL_SCRATCH"' in body
+    assert 'SCRATCH_BASE="$OUT_DIR/.build-scratch"' in body
     assert "SCRATCH_ROOT" in body
     assert re.search(r"rm -rf .*\$SCRATCH_ROOT", body), \
         "build scratch must be cleaned up, not left behind on shared storage"
