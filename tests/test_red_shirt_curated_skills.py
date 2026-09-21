@@ -70,6 +70,60 @@ def test_polaris_resident_build_skill_closes_baseline_failures():
         assert phrase in body, phrase
 
 
+def test_scientific_evidence_skill_closes_baseline_gaps():
+    body = _skill_metadata("scientific-evidence-contract").lower()
+    for phrase in (
+        "contradictory evidence",
+        "missing raw output",
+        "dirty tree",
+        "do not stash",
+        "do not commit",
+        "first unresolved failure",
+        "wrapper-generated",
+        "exactly one",
+        "done",
+        "failed",
+        "numerical",
+        "checksum",
+    ):
+        assert phrase in body, phrase
+
+
+def test_long_command_skill_closes_baseline_gaps():
+    body = _skill_metadata("long-command-process-discipline").lower()
+    for phrase in (
+        "timeouts are seconds",
+        "launch acknowledgement",
+        "exact process handle",
+        "never rerun",
+        "poll",
+        "wait",
+        "exit code",
+        "duplicate",
+        "terminal artifacts",
+        "five minutes",
+    ):
+        assert phrase in body, phrase
+
+
+def test_polaris_mpi_apptainer_skill_closes_baseline_gaps():
+    body = _skill_metadata("polaris-mpi-apptainer").lower()
+    for phrase in (
+        "host `mpiexec --no-transfer`",
+        "exact `$pbs_nodefile`",
+        "container-local `mpiexec`",
+        "pals",
+        "pmi",
+        "four ranks per node",
+        "local rank",
+        "eight distinct gpu uuids",
+        "link audit",
+        "two-rank",
+        "eight-rank",
+    ):
+        assert phrase in body, phrase
+
+
 def test_entrypoint_recursively_seeds_nested_skill_files():
     body = ENTRYPOINT.read_text(encoding="utf-8")
     skills_call = 'managed_seed_tree "$RS_DIR/skills" "$RS_HOME/skills" "skills"'
