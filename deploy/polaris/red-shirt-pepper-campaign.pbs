@@ -80,13 +80,15 @@ ml spack-pe-base
 ml cmake/3.30.5
 ml ninja/1.12.1
 ml apptainer
-ml load cray-mpich
-ml unload darshan
-HOST_APPTAINER="$(command -v apptainer)"
-HOST_MPIEXEC="$(command -v mpiexec)"
+
 install -m 600 "$PBS_NODEFILE" "$RUNTIME/pbs_nodefile"
 sort -u "$PBS_NODEFILE" >"$RUNTIME/hosts.unique"
 test "$(wc -l < "$RUNTIME/hosts.unique")" -eq 2 || { printf 'ERROR: expected two hosts\n' >&2; exit 1; }
+
+# Resolve the accepted host/container ABI environment once; the environment
+# profile below therefore describes the same mpiexec and libraries used later.
+# shellcheck source=../../scripts/red_shirt_mpi_env.sh
+source "$MPI_ENV_HELPER"
 
 PROFILE_INPUT="$RUNTIME/environment-profile.txt"
 {
@@ -103,7 +105,9 @@ export RED_SHIRT_ENV_PROFILE_ID="$(sha256sum "$PROFILE_INPUT" | cut -d' ' -f1)"
 # create application files under TASK but cannot replace these probe programs.
 HOST_BRIDGE="$TOOLS/red_shirt_host_bridge.sh"
 HOST_WATCHER="$TOOLS/red_shirt_host_watcher.sh"
-for helper in red_shirt_host_bridge.sh red_shirt_host_watcher.sh red_shirt_mpi_env.sh; do
+for helper in red_shirt_host_bridge.sh red_shirt_host_watcher.sh red_shirt_rank_wrapper.sh \
+  red_shirt_mpi_env.sh red_shirt_toolchain_stage.sh red_shirt_toolchain_manifest.py \
+  red_shirt_toolchain_preflight.py; do
   test -x "$TOOLS/$helper" || { printf 'ERROR: missing staged helper %s\n' "$helper" >&2; exit 1; }
 done
 install -m 0555 "$TOOLS/red_shirt_toolchain_stage.sh" "$ATTEMPT/red_shirt_toolchain_stage.sh"
@@ -137,9 +141,7 @@ if [ -s "$RED_SHIRT_OUTPUT_DIR/run.ini" ]; then APP_ARGS+=("$RED_SHIRT_OUTPUT_DI
 RUN8
 chmod 0555 "$RUN8_LAUNCHER"
 
-# Switch to the accepted host/container ABI environment for rank launch.
-# shellcheck source=../../scripts/red_shirt_mpi_env.sh
-source "$MPI_ENV_HELPER"
+# Export the accepted host/container ABI environment for rank launch.
 export RED_SHIRT_SIF="$SIF" RED_SHIRT_PBS_NODEFILE="$RUNTIME/pbs_nodefile"
 export RED_SHIRT_RANK_WRAPPER="$TOOLS/red_shirt_rank_wrapper.sh"
 export RED_SHIRT_HOST_APPTAINER="$HOST_APPTAINER" RED_SHIRT_HOST_MPIEXEC="$HOST_MPIEXEC"

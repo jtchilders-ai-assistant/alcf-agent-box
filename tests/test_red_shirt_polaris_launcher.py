@@ -70,6 +70,19 @@ def test_campaign_launcher_wires_reviewed_attempt_contract():
     assert 'command -v nvcc' not in body
     assert 'command -v CC' not in body
     assert 'if [ -s "$RED_SHIRT_OUTPUT_DIR/run.ini" ]' in body
+    watcher_start = body.index('"$HOST_WATCHER" >')
+    for helper in (
+        "red_shirt_host_bridge.sh",
+        "red_shirt_host_watcher.sh",
+        "red_shirt_rank_wrapper.sh",
+        "red_shirt_mpi_env.sh",
+        "red_shirt_toolchain_stage.sh",
+        "red_shirt_toolchain_manifest.py",
+        "red_shirt_toolchain_preflight.py",
+    ):
+        assert body.index(helper) < watcher_start
+    assert body.index('source "$MPI_ENV_HELPER"') < body.index('PROFILE_INPUT="$RUNTIME/environment-profile.txt"')
+    assert "ml load cray-mpich\n" not in body
 
 
 def test_files_exist():

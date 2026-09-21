@@ -4,6 +4,7 @@
 import argparse
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -186,20 +187,32 @@ def run(args):
     prompt = prompt_file.read_text(encoding="utf-8")
     with (runtime_root / "agent.stdout").open("w", encoding="utf-8") as stdout, \
             (runtime_root / "agent.stderr").open("w", encoding="utf-8") as stderr:
+        command = [str(args.hermes_bin), "--yolo", "--in", str(task_root), "-z", prompt]
         try:
-            agent = run_checked(
-                [str(args.hermes_bin), "--yolo", "--in", str(task_root), "-z", prompt],
+            process = subprocess.Popen(
+                command,
                 cwd=str(task_root),
                 stdout=stdout,
                 stderr=stderr,
                 text=True,
-                timeout=args.hermes_timeout,
+                start_new_session=True,
             )
+        except OSError as exc:
+            raise CampaignError("launcher_error", str(exc))
+        try:
+            returncode = process.wait(timeout=args.hermes_timeout)
         except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGTERM)
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait()
             raise CampaignError(
                 "hermes_timeout",
                 "Hermes exceeded the configured timeout of %s seconds." % args.hermes_timeout,
             )
+        agent = subprocess.CompletedProcess(command, returncode)
 
     state = artifact_state(task_root)
     complete = state["REPORT.md"] and state["RESULT.json"] and (state["DONE"] != state["FAILED"])
