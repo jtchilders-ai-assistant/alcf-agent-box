@@ -54,7 +54,7 @@ COPY scripts/red_shirt_task_context.py /opt/red-shirt-polaris/red_shirt_task_con
 COPY scripts/red_shirt_entrypoint.sh /opt/red-shirt-polaris/entrypoint.sh
 COPY config/red-shirt-polaris/ /opt/red-shirt-polaris/config/
 COPY docs/polaris-snapshot/ /opt/red-shirt-polaris/docs/
-COPY skills/ /opt/red-shirt-polaris/skills/
+COPY config/red-shirt-polaris/skills/ /opt/red-shirt-polaris/skills/
 
 RUN chmod 0555 /opt/red-shirt-polaris/entrypoint.sh && chown -R hermes:hermes /opt/red-shirt-polaris
 

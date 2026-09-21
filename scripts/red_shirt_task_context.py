@@ -16,7 +16,7 @@ from pathlib import Path
 
 GENERATED_MARKER = "generated-by: red_shirt_task_context.py"
 SECRET_KEY = re.compile(
-    r"(?:^|_)(?:access_?token|refresh_?token|bearer|authorization|password|passwd|secret|api_?key|auth_?key|token_?file|key_?file)(?:$|_)",
+    r"(?:^|_)(?:access_?token|refresh_?token|oauth_?token|client_?token|token|jwt|bearer|authorization|auth_?header|credential|credentials|password|passwd|secret|api_?key|auth_?key|private_?key|signing_?key|hmac_?key|token_?file|key_?file)(?:$|_)",
     re.IGNORECASE,
 )
 BEARER_VALUE = re.compile(r"(?i)\bbearer\s+\S+")
@@ -168,15 +168,23 @@ def is_generated(path):
 def atomic_write(path, content):
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(prefix=".%s." % path.name, suffix=".tmp", dir=str(path.parent))
+    stream = None
     try:
         os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        stream = os.fdopen(fd, "w", encoding="utf-8")
+        fd = -1
+        with stream:
             stream.write(content)
             stream.flush()
             os.fsync(stream.fileno())
+        stream = None
         os.replace(temp_name, str(path))
         os.chmod(str(path), 0o600)
     except Exception:
+        if stream is not None and not stream.closed:
+            stream.close()
+        if fd >= 0:
+            os.close(fd)
         try:
             os.unlink(temp_name)
         except OSError:
@@ -220,12 +228,15 @@ def generate(task_root, facts_path):
             raise ContextError("refusing to overwrite unrecognized STATUS.json")
 
     facts = load_facts(facts_path)
-    atomic_write(agents_path, agents_document(str(task_root), facts))
+    # AGENTS.md activates the contract when Hermes starts in task_root. Publish
+    # supporting state first and AGENTS.md last so a partial failure cannot
+    # expose new instructions without their matching ENV/STATUS files.
     atomic_write(env_path, env_document(facts))
     if existing_status is None:
         atomic_write(status_path, json.dumps(initial_status(), indent=2, sort_keys=False) + "\n")
     else:
         os.chmod(str(status_path), 0o600)
+    atomic_write(agents_path, agents_document(str(task_root), facts))
 
 
 def parse_args(argv=None):

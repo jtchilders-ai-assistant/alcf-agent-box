@@ -1,3 +1,4 @@
+import importlib.util
 import json
 import os
 import subprocess
@@ -7,6 +8,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
 GENERATOR = ROOT / "scripts" / "red_shirt_task_context.py"
+
+
+def load_generator_module():
+    spec = importlib.util.spec_from_file_location("red_shirt_task_context", GENERATOR)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def run_generator(task_root: Path, facts_path: Path):
@@ -168,7 +177,11 @@ def test_generator_redacts_secret_fields_and_values(tmp_path):
     secret = "do-not-leak-this-bearer-value"
     write_facts(
         facts,
-        credentials={"access_token": secret, "token_file": "/mnt/secrets/inference.token"},
+        credentials=secret,
+        access_token=secret,
+        token_file="/mnt/secrets/inference.token",
+        private_key=secret,
+        jwt=secret,
         note=f"authorization header Bearer {secret}",
     )
 
@@ -181,7 +194,26 @@ def test_generator_redacts_secret_fields_and_values(tmp_path):
     )
     assert secret not in combined
     assert "/mnt/secrets/inference.token" not in combined
-    assert "[REDACTED]" in combined
+    assert combined.count("[REDACTED]") >= 5
+
+
+def test_generator_publishes_agents_last(tmp_path, monkeypatch):
+    module = load_generator_module()
+    task = tmp_path / "task"
+    task.mkdir()
+    facts = tmp_path / "facts.json"
+    write_facts(facts)
+    published = []
+    real_atomic_write = module.atomic_write
+
+    def record_write(path, content):
+        published.append(path.name)
+        real_atomic_write(path, content)
+
+    monkeypatch.setattr(module, "atomic_write", record_write)
+    module.generate(task, facts)
+
+    assert published == ["ENV.md", "STATUS.json", "AGENTS.md"]
 
 
 def test_generator_fails_closed_for_invalid_or_relative_inputs(tmp_path):
@@ -202,3 +234,31 @@ def test_generator_fails_closed_for_invalid_or_relative_inputs(tmp_path):
     )
     assert result.returncode != 0
     assert "absolute" in result.stderr.lower()
+
+
+def test_atomic_write_closes_descriptor_when_fchmod_fails(tmp_path, monkeypatch):
+    module = load_generator_module()
+    real_close = module.os.close
+    closed = []
+
+    def fail_fchmod(_fd, _mode):
+        raise OSError("simulated fchmod failure")
+
+    def record_close(fd):
+        closed.append(fd)
+        return real_close(fd)
+
+    monkeypatch.setattr(module.os, "fchmod", fail_fchmod)
+    monkeypatch.setattr(module.os, "close", record_close)
+    target = tmp_path / "AGENTS.md"
+
+    try:
+        module.atomic_write(target, "content")
+    except OSError as exc:
+        assert "simulated fchmod failure" in str(exc)
+    else:
+        raise AssertionError("atomic_write unexpectedly succeeded")
+
+    assert len(closed) == 1
+    assert not target.exists()
+    assert not list(tmp_path.glob(".AGENTS.md.*.tmp"))

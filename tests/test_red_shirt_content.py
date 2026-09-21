@@ -39,7 +39,7 @@ REQUIRED_COPY_DIRECTIVES = (
     "COPY scripts/red_shirt_entrypoint.sh /opt/red-shirt-polaris/entrypoint.sh",
     "COPY config/red-shirt-polaris/ /opt/red-shirt-polaris/config/",
     "COPY docs/polaris-snapshot/ /opt/red-shirt-polaris/docs/",
-    "COPY skills/ /opt/red-shirt-polaris/skills/",
+    "COPY config/red-shirt-polaris/skills/ /opt/red-shirt-polaris/skills/",
 )
 
 
@@ -275,6 +275,7 @@ def test_soul_covers_resident_execution_and_evidence_contract():
         "runtime evidence",
         "terminal checkpoint",
         "time exhaustion",
+        "context exhaustion",
     ):
         assert phrase in lowered, f"SOUL.md missing resident evidence rule: {phrase}"
 
