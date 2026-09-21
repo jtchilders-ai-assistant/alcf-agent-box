@@ -237,6 +237,58 @@ def test_bridge_fails_closed_when_lock_utility_is_unavailable(tmp_path):
     assert "flock is required" in result.stderr
 
 
+def test_client_refuses_a_second_inflight_request(tmp_path):
+    bridge = tmp_path / "bridge"
+    bridge.mkdir()
+    (bridge / "client.lock").mkdir()
+    env = os.environ.copy()
+    env["RED_SHIRT_BRIDGE_DIR"] = str(bridge)
+    result = subprocess.run(
+        ["bash", str(CLIENT), "env_report", "{}"],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 75
+    assert "already active" in result.stderr
+    assert not (bridge / "request.json").exists()
+
+
+def test_watcher_terminates_and_reaps_inflight_worker(tmp_path):
+    bridge = tmp_path / "attempt" / "bridge"
+    bridge.mkdir(parents=True)
+    worker = tmp_path / "worker.sh"
+    worker_pid = tmp_path / "worker.pid"
+    write_executable(
+        worker,
+        f'printf "%s\\n" "$$" > {str(worker_pid)!r}\nexec sleep 30\n',
+    )
+    env = os.environ.copy()
+    env.update({"RED_SHIRT_BRIDGE_DIR": str(bridge), "RED_SHIRT_HOST_BRIDGE": str(worker)})
+    watcher = subprocess.Popen(["bash", str(WATCHER)], env=env)
+    for _ in range(100):
+        if (bridge / "READY").exists():
+            break
+        __import__("time").sleep(0.01)
+    (bridge / "request.json").write_text(json.dumps({
+        "version": 1, "action": "env_report", "nonce": "terminate-test"
+    }))
+    for _ in range(100):
+        if worker_pid.exists():
+            break
+        __import__("time").sleep(0.01)
+    assert worker_pid.exists()
+    watcher.terminate()
+    assert watcher.wait(timeout=5) != 0
+    pid = int(worker_pid.read_text())
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        pass
+    else:
+        raise AssertionError(f"worker {pid} remained alive")
+
+
 def test_empty_stop_sentinel_stops_watcher(tmp_path):
     bridge = tmp_path / "attempt" / "bridge"
     bridge.mkdir(parents=True)

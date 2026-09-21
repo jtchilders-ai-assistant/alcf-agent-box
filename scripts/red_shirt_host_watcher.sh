@@ -9,6 +9,19 @@ RESPONSE="$BRIDGE_DIR/response.json"
 mkdir -p "$BRIDGE_DIR"
 touch "$BRIDGE_DIR/READY"
 last=""
+worker_pid=""
+
+shutdown() {
+  local rc="$1"
+  trap - EXIT INT TERM
+  if [ -n "$worker_pid" ] && kill -0 "$worker_pid" 2>/dev/null; then
+    kill -TERM "$worker_pid" 2>/dev/null || true
+    wait "$worker_pid" 2>/dev/null || true
+  fi
+  exit "$rc"
+}
+trap 'shutdown 143' TERM
+trap 'shutdown 130' INT
 
 write_error_response() {
   local request="$1" code="$2" message="$3" tmp="$RESPONSE.tmp.$$"
@@ -48,8 +61,11 @@ while :; do
     if [ -n "$nonce" ] && [ "$nonce" != "$last" ]; then
       last="$nonce"
       set +e
-      bash "$HOST_BRIDGE"
+      bash "$HOST_BRIDGE" &
+      worker_pid=$!
+      wait "$worker_pid"
       rc=$?
+      worker_pid=""
       set -e
       if [ ! -s "$RESPONSE" ]; then
         write_error_response "$REQUEST" "$rc" "bridge worker exited without a response"

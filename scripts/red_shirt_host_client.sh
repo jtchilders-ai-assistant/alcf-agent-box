@@ -13,6 +13,16 @@ TIMEOUT_SECONDS="${RED_SHIRT_BRIDGE_TIMEOUT:-1800}"
 REQUEST="$BRIDGE_DIR/request.json"
 RESPONSE="$BRIDGE_DIR/response.json"
 REQUEST_TMP="$BRIDGE_DIR/request.json.tmp.$$"
+CLIENT_LOCK="$BRIDGE_DIR/client.lock"
+
+if ! mkdir "$CLIENT_LOCK" 2>/dev/null; then
+  printf 'bridge client request already active\n' >&2
+  exit 75
+fi
+cleanup_client_lock() {
+  rmdir "$CLIENT_LOCK" 2>/dev/null || true
+}
+trap cleanup_client_lock EXIT INT TERM
 
 python3 - "$REQUEST_TMP" "$ACTION" "$REQUEST_JSON" <<'PY'
 import json
