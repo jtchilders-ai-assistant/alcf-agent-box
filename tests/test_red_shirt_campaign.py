@@ -31,6 +31,8 @@ def run_campaign(
     tmp_path: Path,
     *,
     probe_rc=0,
+    probe_detail=None,
+    token_rc=0,
     hermes_rc=0,
     hermes_artifacts=True,
     terminal_marker="DONE",
@@ -49,15 +51,18 @@ def run_campaign(
     token_helper = executable(tmp_path / "token-helper", f"""
 import sys
 assert sys.argv[1:] == ["get_access_token", "--service", "inference"]
-print({secret!r})
+if {token_rc} == 0:
+    print({secret!r})
+raise SystemExit({token_rc})
 """)
+    detail = probe_detail or ("success" if probe_rc == 0 else "unexpected HTTP status 401")
     probe = executable(tmp_path / "probe", f"""
 import json, os, pathlib, sys
 args=sys.argv[1:]
 pathlib.Path({str(events)!r}).open("a").write("probe\\n")
 token_path=pathlib.Path(args[args.index("--token-file")+1])
 assert token_path.read_text().strip() == {secret!r}
-print(json.dumps({{"ok": {str(probe_rc == 0)}, "status": {200 if probe_rc == 0 else 401}}}))
+print(json.dumps({{"step": "inference", "ok": {str(probe_rc == 0)}, "detail": {detail!r}}}))
 raise SystemExit({probe_rc})
 """)
     hermes_body = f"""
@@ -128,6 +133,32 @@ def test_campaign_blocks_hermes_and_synthesizes_failure_when_smoke_fails(tmp_pat
     assert secret not in (task / "REPORT.md").read_text()
 
 
+def test_campaign_classifies_real_probe_401_and_503_schema(tmp_path):
+    for status, expected in ((401, "authorization"), (503, "unavailable")):
+        case = tmp_path / str(status)
+        case.mkdir()
+        result, task, _runtime, _events, _secret = run_campaign(
+            case,
+            probe_rc=1,
+            probe_detail=f"unexpected HTTP status {status}",
+        )
+        assert result.returncode != 0
+        payload = json.loads((task / "RESULT.json").read_text())
+        assert expected in payload["failure"]["message"].lower()
+
+
+def test_campaign_blocks_hermes_when_token_refresh_fails(tmp_path):
+    result, task, runtime, events, _secret = run_campaign(tmp_path, token_rc=9)
+
+    assert result.returncode != 0
+    assert not events.exists()
+    assert not (tmp_path / "hermes-args.json").exists()
+    assert not (runtime / "inference.token").exists()
+    payload = json.loads((task / "RESULT.json").read_text())
+    assert payload["failure"]["kind"] == "token_refresh_failed"
+    assert payload["agent"]["exit_code"] is None
+
+
 def test_campaign_synthesizes_failure_when_hermes_exits_without_artifacts(tmp_path):
     result, task, runtime, _events, _secret = run_campaign(
         tmp_path, hermes_rc=1, hermes_artifacts=False
@@ -151,6 +182,7 @@ def test_campaign_converts_incomplete_zero_exit_to_failure(tmp_path):
     assert result.returncode != 0
     payload = json.loads((task / "RESULT.json").read_text())
     assert payload["failure"]["kind"] == "missing_terminal_artifacts"
+    assert payload["agent"]["exit_code"] == 0
     assert (task / "FAILED").is_file()
     assert not (task / "DONE").exists()
 

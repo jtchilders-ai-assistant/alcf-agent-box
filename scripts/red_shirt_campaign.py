@@ -15,10 +15,11 @@ TERMINAL_MARKERS = ("DONE", "FAILED")
 
 
 class CampaignError(Exception):
-    def __init__(self, kind, message, exit_code=1):
+    def __init__(self, kind, message, exit_code=1, agent_exit=None):
         super().__init__(message)
         self.kind = kind
         self.exit_code = exit_code
+        self.agent_exit = agent_exit
 
 
 def atomic_write(path, content, mode=0o600):
@@ -72,10 +73,12 @@ def load_status(task_root):
 def classify_probe_failure(probe_path):
     try:
         data = json.loads(probe_path.read_text(encoding="utf-8"))
-        status = int(data.get("status", 0))
-        if status == 401:
+        detail = data.get("detail", "")
+        if not isinstance(detail, str):
+            detail = ""
+        if "HTTP status 401" in detail:
             return "inference_smoke_failed", "Inference authorization was rejected (HTTP 401)."
-        if status == 503:
+        if "HTTP status 503" in detail:
             return "inference_smoke_failed", "Inference endpoint was unavailable (HTTP 503)."
     except (OSError, ValueError, TypeError):
         pass
@@ -146,8 +149,8 @@ def run(args):
     token_path = runtime_root / "inference.token"
     smoke_path = runtime_root / "inference-smoke.json"
     try:
-        with token_path.open("w", encoding="utf-8") as stream:
-            os.chmod(str(token_path), 0o600)
+        token_fd = os.open(str(token_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(token_fd, "w", encoding="utf-8") as stream:
             token = run_checked(
                 [str(args.token_helper), "get_access_token", "--service", "inference"],
                 stdout=stream,
@@ -191,18 +194,34 @@ def run(args):
     state = artifact_state(task_root)
     complete = state["REPORT.md"] and state["RESULT.json"] and (state["DONE"] != state["FAILED"])
     if agent.returncode:
-        raise CampaignError("hermes_failed", "Hermes exited nonzero.", agent.returncode)
+        raise CampaignError("hermes_failed", "Hermes exited nonzero.", agent.returncode, agent.returncode)
     if not complete:
-        raise CampaignError("missing_terminal_artifacts", "Hermes exited without the complete terminal artifact contract.")
+        raise CampaignError(
+            "missing_terminal_artifacts",
+            "Hermes exited without the complete terminal artifact contract.",
+            agent_exit=agent.returncode,
+        )
     try:
         result_payload = json.loads((task_root / "RESULT.json").read_text(encoding="utf-8"))
         overall_status = result_payload.get("overall_status")
     except (OSError, ValueError, TypeError) as exc:
-        raise CampaignError("invalid_terminal_artifacts", "RESULT.json is invalid: %s" % exc)
+        raise CampaignError(
+            "invalid_terminal_artifacts",
+            "RESULT.json is invalid: %s" % exc,
+            agent_exit=agent.returncode,
+        )
     if state["DONE"] and overall_status != "success":
-        raise CampaignError("invalid_terminal_artifacts", "DONE requires RESULT.json overall_status=success.")
+        raise CampaignError(
+            "invalid_terminal_artifacts",
+            "DONE requires RESULT.json overall_status=success.",
+            agent_exit=agent.returncode,
+        )
     if state["FAILED"] and overall_status == "success":
-        raise CampaignError("invalid_terminal_artifacts", "FAILED contradicts RESULT.json overall_status=success.")
+        raise CampaignError(
+            "invalid_terminal_artifacts",
+            "FAILED contradicts RESULT.json overall_status=success.",
+            agent_exit=agent.returncode,
+        )
     return 0
 
 
@@ -231,7 +250,7 @@ def main(argv=None):
             task_root = args.task_root.resolve()
             runtime_root = args.runtime_root.resolve()
             if task_root.is_dir() and runtime_root.is_dir():
-                synthesize_failure(task_root, runtime_root, exc.kind, str(exc), exc.exit_code)
+                synthesize_failure(task_root, runtime_root, exc.kind, str(exc), exc.agent_exit)
         except Exception as synthesis_error:
             print("red_shirt_campaign: failure synthesis failed: %s" % synthesis_error, file=sys.stderr)
         print("red_shirt_campaign: %s" % exc, file=sys.stderr)
