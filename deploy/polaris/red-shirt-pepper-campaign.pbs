@@ -84,21 +84,18 @@ ml load cray-mpich
 ml unload darshan
 HOST_APPTAINER="$(command -v apptainer)"
 HOST_MPIEXEC="$(command -v mpiexec)"
-MPICXX="$(command -v CC)"
-NVCC="$(command -v nvcc)"
-CMAKE="$(command -v cmake)"
 install -m 600 "$PBS_NODEFILE" "$RUNTIME/pbs_nodefile"
 sort -u "$PBS_NODEFILE" >"$RUNTIME/hosts.unique"
 test "$(wc -l < "$RUNTIME/hosts.unique")" -eq 2 || { printf 'ERROR: expected two hosts\n' >&2; exit 1; }
 
 PROFILE_INPUT="$RUNTIME/environment-profile.txt"
 {
-  printf 'pbs_job_id=%s\nmpicxx=%s\nmpiexec=%s\nnvcc=%s\ncmake=%s\n' \
-    "$JOB_ID" "$MPICXX" "$HOST_MPIEXEC" "$NVCC" "$CMAKE"
+  printf 'pbs_job_id=%s\nmpiexec=%s\napptainer=%s\n' \
+    "$JOB_ID" "$HOST_MPIEXEC" "$HOST_APPTAINER"
   sha256sum "$RUNTIME/pbs_nodefile"
   module list 2>&1
-  "$MPICXX" --version 2>&1
-  "$NVCC" --version 2>&1
+  "$HOST_MPIEXEC" --version 2>&1
+  "$HOST_APPTAINER" --version 2>&1
 } >"$PROFILE_INPUT"
 export RED_SHIRT_ENV_PROFILE_ID="$(sha256sum "$PROFILE_INPUT" | cut -d' ' -f1)"
 
@@ -126,6 +123,8 @@ set -euo pipefail
 : "${RED_SHIRT_PALS_RUNTIME_DIR:?}"
 export APPTAINERENV_LD_LIBRARY_PATH="$RED_SHIRT_HOST_MPI_LD_LIBRARY_PATH:/hostlib64"
 export APPTAINERENV_CRAY_LD_LIBRARY_PATH="$CRAY_LD_LIBRARY_PATH"
+declare -a APP_ARGS=()
+if [ -s "$RED_SHIRT_OUTPUT_DIR/run.ini" ]; then APP_ARGS+=("$RED_SHIRT_OUTPUT_DIR/run.ini"); fi
 "$RED_SHIRT_HOST_MPIEXEC" --no-transfer --hostfile "$RED_SHIRT_PBS_NODEFILE" \
   -n 8 --ppn 4 --depth 8 --cpu-bind depth \
   "$RED_SHIRT_HOST_APPTAINER" exec --nv \
@@ -134,7 +133,7 @@ export APPTAINERENV_CRAY_LD_LIBRARY_PATH="$CRAY_LD_LIBRARY_PATH"
     --bind "/opt/cray/libfabric:/opt/cray/libfabric:ro" \
     --bind "/usr/lib64:/hostlib64:ro" --bind "/soft:/soft:ro" \
     --bind "$RED_SHIRT_PALS_RUNTIME_DIR:$RED_SHIRT_PALS_RUNTIME_DIR" \
-    "$RED_SHIRT_SIF" "$RED_SHIRT_RANK_WRAPPER" "$RED_SHIRT_EXECUTABLE" "$RED_SHIRT_OUTPUT_DIR/run.ini"
+    "$RED_SHIRT_SIF" "$RED_SHIRT_RANK_WRAPPER" "$RED_SHIRT_EXECUTABLE" "${APP_ARGS[@]}"
 RUN8
 chmod 0555 "$RUN8_LAUNCHER"
 
@@ -151,9 +150,8 @@ export RED_SHIRT_RUN8_LAUNCHER="$RUN8_LAUNCHER"
 export RED_SHIRT_PRODUCTION_RUNNER="$RUN8_LAUNCHER"
 export RED_SHIRT_BRIDGE_DIR="$BRIDGE" RED_SHIRT_HOST_BRIDGE="$HOST_BRIDGE"
 export RED_SHIRT_PROBE_WORKDIR="$PROBE_WORK"
-export RED_SHIRT_MPICXX="$MPICXX" RED_SHIRT_MPIEXEC="$HOST_MPIEXEC"
+export RED_SHIRT_MPIEXEC="$HOST_MPIEXEC"
 export RED_SHIRT_PBS_NODEFILE="$RUNTIME/pbs_nodefile"
-export RED_SHIRT_NVCC="$NVCC" RED_SHIRT_CMAKE="$CMAKE"
 export RED_SHIRT_EXPECTED_RANKS=8 RED_SHIRT_EXPECTED_HOSTS=2
 
 "$HOST_WATCHER" >"$RUNTIME/bridge-watcher.stdout" 2>"$RUNTIME/bridge-watcher.stderr" &

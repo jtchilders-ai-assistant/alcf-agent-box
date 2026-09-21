@@ -67,7 +67,9 @@ def test_campaign_launcher_wires_reviewed_attempt_contract():
     assert 'RED_SHIRT_KOKKOS_PREFIX:?' not in body
     assert 'RED_SHIRT_PEPPER_SOURCE:?' not in body
     assert 'RED_SHIRT_PEPPER_CACHE_INIT:?' not in body
-    assert 'run.ini' in body
+    assert 'command -v nvcc' not in body
+    assert 'command -v CC' not in body
+    assert 'if [ -s "$RED_SHIRT_OUTPUT_DIR/run.ini" ]' in body
 
 
 def test_files_exist():
