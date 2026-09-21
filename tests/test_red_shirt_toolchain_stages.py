@@ -55,6 +55,8 @@ def test_probe_requires_explicit_selected_stack_inputs():
         "RED_SHIRT_PEPPER_SOURCE",
         "RED_SHIRT_PRODUCTION_RUNNER",
         "RED_SHIRT_ENV_PROFILE_ID",
+        "RED_SHIRT_EXPECTED_RANKS",
+        "RED_SHIRT_EXPECTED_HOSTS",
     ):
         assert variable in text
     assert "module load" not in text
@@ -78,6 +80,9 @@ def test_probe_contains_real_stage_acceptance_operations():
         "Kokkos_ARCH_AMPERE80",
         "Kokkos::kokkos",
         "Kokkos::parallel_reduce",
+        "MPI_PROBE rank=%d size=%d host=%s",
+        "KOKKOS_PROBE rank=%d host=%s value=%ld",
+        "len(hosts) == 2",
         "KOKKOS_ENABLE_CUDA",
         "KOKKOS_ENABLE_CUDA_LAMBDA",
         "KOKKOS_ENABLE_CUDA_CONSTEXPR",

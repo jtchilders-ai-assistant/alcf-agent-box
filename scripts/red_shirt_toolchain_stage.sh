@@ -45,10 +45,12 @@ EOF
     cat >mpi.cpp <<'EOF'
 #include <mpi.h>
 #include <cstdio>
+#include <unistd.h>
 int main(int argc, char **argv) {
-  MPI_Init(&argc, &argv); int rank = -1, size = -1;
+  MPI_Init(&argc, &argv); int rank = -1, size = -1; char host[256] = {0};
+  gethostname(host, sizeof(host) - 1);
   MPI_Comm_rank(MPI_COMM_WORLD, &rank); MPI_Comm_size(MPI_COMM_WORLD, &size);
-  std::printf("MPI_PROBE rank=%d size=%d\n", rank, size);
+  std::printf("MPI_PROBE rank=%d size=%d host=%s\n", rank, size, host);
   MPI_Finalize(); return size == 2 ? 0 : 3;
 }
 EOF
@@ -57,9 +59,11 @@ EOF
     python3 - <<'PY'
 import re
 text=open('mpi-run.log').read()
-records=re.findall(r'MPI_PROBE rank=(\d+) size=(\d+)', text)
-assert {int(r) for r,s in records} == {0,1}, records
-assert {int(s) for r,s in records} == {2}, records
+records=re.findall(r'MPI_PROBE rank=(\d+) size=(\d+) host=(\S+)', text)
+assert {int(r) for r,s,h in records} == {0,1}, records
+assert {int(s) for r,s,h in records} == {2}, records
+hosts={h.split('.',1)[0] for r,s,h in records}
+assert len(hosts) == 2, records
 PY
     ;;
 
@@ -161,8 +165,10 @@ EOF
 #include <cstdio>
 #include <fstream>
 #include <string>
+#include <unistd.h>
 int main(int argc, char **argv) {
-  MPI_Init(&argc, &argv); int rank=-1; MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  MPI_Init(&argc, &argv); int rank=-1; char host[256] = {0};
+  gethostname(host, sizeof(host) - 1); MPI_Comm_rank(MPI_COMM_WORLD, &rank);
   Kokkos::initialize(argc, argv); long value=0;
   Kokkos::parallel_reduce("probe", 1024, KOKKOS_LAMBDA(int, long& x){x+=1;}, value);
   Kokkos::fence();
@@ -173,7 +179,7 @@ int main(int argc, char **argv) {
           line.find("cuda") != std::string::npos) std::printf("LOADED_LIB %s\n", line.c_str());
     }
   }
-  std::printf("KOKKOS_PROBE rank=%d value=%ld\n", rank, value);
+  std::printf("KOKKOS_PROBE rank=%d host=%s value=%ld\n", rank, host, value);
   Kokkos::finalize(); MPI_Finalize(); return value == 1024 ? 0 : 4;
 }
 EOF
@@ -183,10 +189,13 @@ EOF
     python3 - <<'PY'
 import re
 text=open('production-run.log').read()
-records=re.findall(r'KOKKOS_PROBE rank=(\d+) value=(\d+)', text)
+records=re.findall(r'KOKKOS_PROBE rank=(\d+) host=(\S+) value=(\d+)', text)
 expected=int(__import__('os').environ.get('RED_SHIRT_EXPECTED_RANKS', '8'))
-assert {int(r) for r,v in records} == set(range(expected)), records
-assert {int(v) for r,v in records} == {1024}, records
+expected_hosts=int(__import__('os').environ.get('RED_SHIRT_EXPECTED_HOSTS', '2'))
+assert {int(r) for r,h,v in records} == set(range(expected)), records
+assert {int(v) for r,h,v in records} == {1024}, records
+hosts={h.split('.',1)[0] for r,h,v in records}
+assert len(hosts) == expected_hosts, (hosts, records)
 loaded=[line for line in text.splitlines() if line.startswith('LOADED_LIB ')]
 assert any('mpi' in line.lower() for line in loaded), loaded
 assert any('gtl' in line.lower() for line in loaded), loaded
