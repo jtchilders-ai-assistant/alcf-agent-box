@@ -3,9 +3,13 @@
 
 import os
 import subprocess
+import sys
 
 
-device = os.environ["CUDA_VISIBLE_DEVICES"]
+device = os.environ.get("CUDA_VISIBLE_DEVICES")
+if not device:
+    print("CUDA_VISIBLE_DEVICES is not set", file=sys.stderr)
+    raise SystemExit(2)
 subprocess.run(
     [
         "nvidia-smi",

@@ -3,16 +3,18 @@ set -euo pipefail
 umask 077
 
 BRIDGE_DIR="${RED_SHIRT_BRIDGE_DIR:?RED_SHIRT_BRIDGE_DIR is required}"
-ATTEMPT_ROOT="${RED_SHIRT_ATTEMPT_ROOT:-$(dirname "$BRIDGE_DIR")}" 
+ATTEMPT_ROOT="${RED_SHIRT_ATTEMPT_ROOT:-${BRIDGE_DIR%/*}}"
 REQUEST="$BRIDGE_DIR/request.json"
 RESPONSE="$BRIDGE_DIR/response.json"
 RESPONSE_TMP="$BRIDGE_DIR/response.json.tmp.$$"
 LOCK="$BRIDGE_DIR/request.lock"
 
 exec 9>"$LOCK"
-if command -v flock >/dev/null 2>&1; then
-  flock -n 9 || { printf 'bridge request already active\n' >&2; exit 75; }
+if ! command -v flock >/dev/null 2>&1; then
+  printf 'flock is required for bridge request serialization\n' >&2
+  exit 69
 fi
+flock -n 9 || { printf 'bridge request already active\n' >&2; exit 75; }
 
 request_env="$BRIDGE_DIR/request.env.$$"
 set +e
@@ -148,14 +150,14 @@ PY
         printf 'requested executable is absent or not executable\n' >"$stderr_path"
         : >"$stdout_path"
         rc=66
-      elif [ -z "${RED_SHIRT_RUN8_COMMAND:-}" ]; then
-        printf 'RED_SHIRT_RUN8_COMMAND is not configured\n' >"$stderr_path"
+      elif [ -z "${RED_SHIRT_RUN8_LAUNCHER:-}" ] || [ ! -x "$RED_SHIRT_RUN8_LAUNCHER" ]; then
+        printf 'RED_SHIRT_RUN8_LAUNCHER is absent or not executable\n' >"$stderr_path"
         : >"$stdout_path"
         rc=78
       else
         set +e
         RED_SHIRT_EXECUTABLE="$REQ_EXECUTABLE" RED_SHIRT_OUTPUT_DIR="$REQ_OUTPUT_DIR" \
-          bash -c "$RED_SHIRT_RUN8_COMMAND" >"$stdout_path" 2>"$stderr_path"
+          "$RED_SHIRT_RUN8_LAUNCHER" >"$stdout_path" 2>"$stderr_path"
         rc=$?
         set -e
       fi
