@@ -186,13 +186,20 @@ def run(args):
     prompt = prompt_file.read_text(encoding="utf-8")
     with (runtime_root / "agent.stdout").open("w", encoding="utf-8") as stdout, \
             (runtime_root / "agent.stderr").open("w", encoding="utf-8") as stderr:
-        agent = run_checked(
-            [str(args.hermes_bin), "--yolo", "--in", str(task_root), "-z", prompt],
-            cwd=str(task_root),
-            stdout=stdout,
-            stderr=stderr,
-            text=True,
-        )
+        try:
+            agent = run_checked(
+                [str(args.hermes_bin), "--yolo", "--in", str(task_root), "-z", prompt],
+                cwd=str(task_root),
+                stdout=stdout,
+                stderr=stderr,
+                text=True,
+                timeout=args.hermes_timeout,
+            )
+        except subprocess.TimeoutExpired:
+            raise CampaignError(
+                "hermes_timeout",
+                "Hermes exceeded the configured timeout of %s seconds." % args.hermes_timeout,
+            )
 
     state = artifact_state(task_root)
     complete = state["REPORT.md"] and state["RESULT.json"] and (state["DONE"] != state["FAILED"])
@@ -241,7 +248,11 @@ def parse_args(argv=None):
     parser.add_argument("--model", required=True)
     parser.add_argument("--proxy", required=True)
     parser.add_argument("--hermes-bin", required=True, type=Path)
-    return parser.parse_args(argv)
+    parser.add_argument("--hermes-timeout", required=True, type=int)
+    args = parser.parse_args(argv)
+    if args.hermes_timeout <= 0:
+        parser.error("--hermes-timeout must be a positive integer")
+    return args
 
 
 def main(argv=None):

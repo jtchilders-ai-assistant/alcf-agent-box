@@ -37,6 +37,8 @@ def run_campaign(
     hermes_artifacts=True,
     terminal_marker="DONE",
     overall_status="success",
+    hermes_sleep=0,
+    hermes_timeout=20,
 ):
     task = tmp_path / "task"
     runtime = tmp_path / "runtime"
@@ -66,8 +68,9 @@ print(json.dumps({{"step": "inference", "ok": {str(probe_rc == 0)}, "detail": {d
 raise SystemExit({probe_rc})
 """)
     hermes_body = f"""
-import json, os, pathlib, sys
+import json, os, pathlib, sys, time
 root=pathlib.Path.cwd()
+time.sleep({hermes_sleep})
 pathlib.Path({str(events)!r}).open("a").write("hermes\\n")
 pathlib.Path({str(tmp_path / 'hermes-args.json')!r}).write_text(json.dumps(sys.argv[1:]))
 assert (root / "AGENTS.md").is_file()
@@ -97,6 +100,7 @@ assert (root / "STATUS.json").is_file()
         "--model", "test-model",
         "--proxy", "http://proxy.invalid:3128",
         "--hermes-bin", str(hermes),
+        "--hermes-timeout", str(hermes_timeout),
     ]
     result = subprocess.run(command, capture_output=True, text=True, timeout=30)
     return result, task, runtime, events, secret
@@ -157,6 +161,20 @@ def test_campaign_blocks_hermes_when_token_refresh_fails(tmp_path):
     payload = json.loads((task / "RESULT.json").read_text())
     assert payload["failure"]["kind"] == "token_refresh_failed"
     assert payload["agent"]["exit_code"] is None
+
+
+def test_campaign_times_out_hermes_and_synthesizes_failure(tmp_path):
+    result, task, _runtime, _events, _secret = run_campaign(
+        tmp_path,
+        hermes_sleep=2,
+        hermes_timeout=1,
+        hermes_artifacts=False,
+    )
+    assert result.returncode != 0
+    payload = json.loads((task / "RESULT.json").read_text())
+    assert payload["failure"]["kind"] == "hermes_timeout"
+    assert payload["agent"]["exit_code"] is None
+    assert (task / "FAILED").is_file()
 
 
 def test_campaign_synthesizes_failure_when_hermes_exits_without_artifacts(tmp_path):

@@ -69,7 +69,6 @@ def test_manifest_generator_requires_named_environment_profile(tmp_path):
 def test_probe_requires_explicit_selected_stack_inputs():
     text = PROBE.read_text()
     for variable in (
-        "RED_SHIRT_CXX",
         "RED_SHIRT_MPICXX",
         "RED_SHIRT_MPIEXEC",
         "RED_SHIRT_PBS_NODEFILE",

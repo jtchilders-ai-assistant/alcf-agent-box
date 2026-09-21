@@ -25,7 +25,7 @@ reject_unresolved() {
 
 case "$stage" in
   cxx20_concepts)
-    CXX="${RED_SHIRT_CXX:?RED_SHIRT_CXX is required}"
+    CXX="${RED_SHIRT_MPICXX:?RED_SHIRT_MPICXX is required}"
     cat >concepts.cpp <<'EOF'
 #include <concepts>
 template<class T> concept Integral = std::integral<T>;
