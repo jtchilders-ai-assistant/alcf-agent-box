@@ -262,3 +262,174 @@ def test_atomic_write_closes_descriptor_when_fchmod_fails(tmp_path, monkeypatch)
     assert len(closed) == 1
     assert not target.exists()
     assert not list(tmp_path.glob(".AGENTS.md.*.tmp"))
+
+
+# ---------------------------------------------------------------------------
+# Task 5: Resident context includes catalog discovery guidance
+# ---------------------------------------------------------------------------
+
+def write_facts_with_catalog(path: Path, **updates):
+    """Write a facts.json that includes an environment_catalog entry."""
+    import json as _json
+    facts = {
+        "pbs": {
+            "job_id": "5678.polaris-pbs-01",
+            "remaining_walltime": "00:55:00",
+            "nodefile": "/opt/data/campaign/run/pbs_nodefile",
+            "nodefile_sha256": "d" * 64,
+            "nodes": 2,
+            "ranks": 8,
+            "gpus_per_node": 4,
+        },
+        "image": {
+            "sif_path": "/opt/data/images/red-shirt.sif",
+            "source_digest": "sha256:" + "e" * 64,
+            "sif_sha256": "f" * 64,
+            "revision": "abc1234",
+        },
+        "agent": {
+            "hermes_version": "2026.9.21",
+            "provider": "alcf-minerva",
+            "model": "probe-model-bf16",
+            "python": "3.11.9",
+        },
+        "toolchain": {
+            "profile_id": "gnu14-catalog-test",
+            "compiler": "CC backed by GNU 14",
+            "mpi": "Cray MPICH",
+            "cuda": "CUDA 12.4",
+            "kokkos": "4.4.01",
+            "modules": ["PrgEnv-gnu", "cray-mpich", "cuda"],
+        },
+        "bridge": {
+            "client": "/opt/data/campaign-tools/red-shirt-host",
+            "actions": ["env_report", "run_script", "run8"],
+            "timeout_units": "seconds",
+        },
+        "network": {"public_egress": "ALCF HTTP(S) proxy required"},
+        "writable_roots": [str(path.parent / "task")],
+        "environment_catalog": {
+            "site_db": "/opt/attempt/environment/site.sqlite",
+            "site_sha256": "a" * 64,
+            "overlay": "/opt/attempt/environment-overlay",
+            "query_cli": "/opt/red-shirt-polaris/red_shirt_env_catalog.py",
+            "collection_status": "complete",
+            "epistemic_status": "discovery_only_not_compatibility_proof",
+        },
+    }
+    facts.update(updates)
+    path.write_text(_json.dumps(facts), encoding="utf-8")
+
+
+def test_agents_document_explains_catalog_discovery(tmp_path):
+    """AGENTS.md must instruct Red Shirt on catalog use for discovery."""
+    task = tmp_path / "task"
+    task.mkdir()
+    facts = tmp_path / "facts.json"
+    write_facts_with_catalog(facts)
+
+    result = run_generator(task, facts)
+
+    assert result.returncode == 0, result.stderr
+    agents = (task / "AGENTS.md").read_text(encoding="utf-8")
+
+    for phrase in (
+        "catalog",
+        "discovery",
+        "provenance",
+        "discovery_only_not_compatibility_proof",
+    ):
+        assert phrase.lower() in agents.lower(), (
+            f"AGENTS.md must mention '{phrase}' when environment_catalog is in facts"
+        )
+
+
+def test_agents_document_explains_catalog_freshness_and_completeness(tmp_path):
+    """AGENTS.md must mention freshness/completeness caveats for the catalog."""
+    task = tmp_path / "task"
+    task.mkdir()
+    facts = tmp_path / "facts.json"
+    write_facts_with_catalog(facts)
+
+    result = run_generator(task, facts)
+
+    assert result.returncode == 0, result.stderr
+    agents = (task / "AGENTS.md").read_text(encoding="utf-8")
+
+    for phrase in ("freshness", "completeness", "snapshot"):
+        assert phrase.lower() in agents.lower(), (
+            f"AGENTS.md must mention catalog '{phrase}' limitations"
+        )
+
+
+def test_agents_document_preserves_contradictions_instruction(tmp_path):
+    """AGENTS.md must tell Red Shirt to preserve contradictory catalog records."""
+    task = tmp_path / "task"
+    task.mkdir()
+    facts = tmp_path / "facts.json"
+    write_facts_with_catalog(facts)
+
+    result = run_generator(task, facts)
+
+    assert result.returncode == 0, result.stderr
+    agents = (task / "AGENTS.md").read_text(encoding="utf-8")
+
+    assert "contradict" in agents.lower() or "conflict" in agents.lower(), (
+        "AGENTS.md must instruct Red Shirt to preserve (not erase) contradictory records"
+    )
+
+
+def test_agents_document_instructs_structured_observations(tmp_path):
+    """AGENTS.md must tell Red Shirt to record structured attempt observations."""
+    task = tmp_path / "task"
+    task.mkdir()
+    facts = tmp_path / "facts.json"
+    write_facts_with_catalog(facts)
+
+    result = run_generator(task, facts)
+
+    assert result.returncode == 0, result.stderr
+    agents = (task / "AGENTS.md").read_text(encoding="utf-8")
+
+    assert "observation" in agents.lower() or "overlay" in agents.lower(), (
+        "AGENTS.md must instruct Red Shirt to record structured observations in the overlay"
+    )
+
+
+def test_agents_document_compile_link_runtime_proof_remains_authoritative(tmp_path):
+    """AGENTS.md must make clear that compiled/link/runtime proof is authoritative."""
+    task = tmp_path / "task"
+    task.mkdir()
+    facts = tmp_path / "facts.json"
+    write_facts_with_catalog(facts)
+
+    result = run_generator(task, facts)
+
+    assert result.returncode == 0, result.stderr
+    agents = (task / "AGENTS.md").read_text(encoding="utf-8")
+
+    # Evidence hierarchy must persist even with catalog guidance added.
+    for phrase in ("compiled/link evidence", "runtime evidence"):
+        assert phrase.lower() in agents.lower(), (
+            f"AGENTS.md must retain evidence hierarchy phrase: '{phrase}'"
+        )
+
+
+def test_agents_document_catalog_guidance_absent_when_no_catalog_in_facts(tmp_path):
+    """Catalog guidance section must not appear when facts have no environment_catalog."""
+    task = tmp_path / "task"
+    task.mkdir()
+    facts = tmp_path / "facts.json"
+    # write_facts (from conftest/top) has no environment_catalog
+    write_facts(facts)
+
+    result = run_generator(task, facts)
+
+    assert result.returncode == 0, result.stderr
+    agents = (task / "AGENTS.md").read_text(encoding="utf-8")
+
+    # When there is no catalog, the epistemic marker phrase must not appear
+    # (would be confusing/misleading to mention it without the catalog)
+    assert "discovery_only_not_compatibility_proof" not in agents, (
+        "Catalog epistemic marker must not appear in AGENTS.md when no catalog is in facts"
+    )

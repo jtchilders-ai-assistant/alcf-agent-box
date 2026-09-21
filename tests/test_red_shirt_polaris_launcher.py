@@ -577,6 +577,38 @@ def test_pbs_preserves_signal_failure_status_on_sigterm(tmp_path):
     assert payload["pbs_job_id"] == job_id
 
 
+def test_campaign_verifies_catalog_through_a_bound_path():
+    """The pre-copy schema verification must expose the host catalog inside SIF."""
+    body = text(CAMPAIGN_PBS)
+    assert re.search(
+        r'apptainer.*exec.*--bind\s+"?\$RED_SHIRT_ENV_CATALOG:/environment/site\.sqlite:ro"?',
+        body,
+        re.DOTALL,
+    ), "catalog CLI cannot verify an unbound host path from inside the SIF"
+    assert re.search(
+        r'red_shirt_env_catalog\.py\s+verify\s+\\?\s*\n\s*--db\s+"?/environment/site\.sqlite"?',
+        body,
+    ), "campaign must use the catalog CLI's real --db interface"
+
+
+def test_campaign_reverify_does_not_reuse_wrong_basename_sidecar():
+    """A copied sidecar naming its source basename cannot verify site.sqlite."""
+    body = text(CAMPAIGN_PBS)
+    assert 'sha256sum -c "site.sqlite.sha256"' not in body
+    assert re.search(
+        r'red_shirt_env_catalog\.py\s+verify\s+\\?\s*\n\s*--db\s+"?/environment/site\.sqlite"?',
+        body,
+    )
+
+
+def test_campaign_facts_use_container_paths_and_real_catalog_status():
+    body = text(CAMPAIGN_PBS)
+    assert '"site_db":"/environment/site.sqlite"' in body.replace(" ", "")
+    assert '"overlay":overlay' in body.replace(" ", "")
+    assert '"collection_status":"see site db"' not in body
+    assert '"snapshot_id"' in body
+
+
 # ---------------------------------------------------------------------------
 # Task 4: Environment-catalog image and campaign integration
 # ---------------------------------------------------------------------------
