@@ -123,6 +123,19 @@ def test_preflight_rejects_commands_outside_the_manifest_tree(tmp_path):
     assert "escapes manifest directory" in result.stderr
 
 
+def test_preflight_rejects_non_executable_stage_command(tmp_path):
+    manifest, output = make_probe_fixture(tmp_path)
+    payload = json.loads(manifest.read_text())
+    command = Path(payload["stages"][0]["command"][0])
+    command.chmod(0o600)
+
+    result = run_preflight(manifest, output)
+
+    assert result.returncode != 0
+    assert "not an executable file" in result.stderr
+    assert not (output / "toolchain-preflight.json").exists()
+
+
 def test_atomic_json_closes_descriptor_when_fdopen_fails(tmp_path, monkeypatch):
     module = load_preflight_module()
     real_close = module.os.close

@@ -70,7 +70,9 @@ def main() -> int:
     if not probe.is_file() or not os.access(str(probe), os.X_OK):
         parser.error("stage probe must be an executable regular file")
 
-    profile = os.environ.get("RED_SHIRT_ENV_PROFILE_ID", "unvalidated")
+    profile = os.environ.get("RED_SHIRT_ENV_PROFILE_ID", "").strip()
+    if not profile:
+        parser.error("RED_SHIRT_ENV_PROFILE_ID is required")
     payload = {
         "schema_version": 1,
         "environment_profile_id": profile,

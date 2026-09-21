@@ -30,18 +30,40 @@ def test_manifest_generator_emits_exact_order_and_attempt_local_commands(tmp_pat
     staged_probe.chmod(0o755)
     output = attempt / "manifest.json"
 
+    env = dict(__import__("os").environ)
+    env["RED_SHIRT_ENV_PROFILE_ID"] = "fixture-profile"
     result = subprocess.run(
         ["python3", str(MANIFEST), "--attempt-root", str(attempt),
          "--stage-probe", str(staged_probe), "--output", str(output)],
-        capture_output=True, text=True,
+        env=env, capture_output=True, text=True,
     )
 
     assert result.returncode == 0, result.stderr
     payload = json.loads(output.read_text())
     assert [stage["name"] for stage in payload["stages"]] == STAGES
-    assert payload["environment_profile_id"] == "unvalidated"
+    assert payload["environment_profile_id"] == "fixture-profile"
     for stage in payload["stages"]:
         assert stage["command"] == [str(staged_probe), stage["name"]]
+
+
+def test_manifest_generator_requires_named_environment_profile(tmp_path):
+    attempt = tmp_path / "attempt"
+    attempt.mkdir()
+    staged_probe = attempt / "red_shirt_toolchain_stage.sh"
+    staged_probe.write_text(PROBE.read_text())
+    staged_probe.chmod(0o755)
+    output = attempt / "manifest.json"
+    env = dict(__import__("os").environ)
+    env.pop("RED_SHIRT_ENV_PROFILE_ID", None)
+
+    result = subprocess.run(
+        ["python3", str(MANIFEST), "--attempt-root", str(attempt),
+         "--stage-probe", str(staged_probe), "--output", str(output)],
+        env=env, capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert "RED_SHIRT_ENV_PROFILE_ID" in result.stderr
+    assert not output.exists()
 
 
 def test_probe_requires_explicit_selected_stack_inputs():

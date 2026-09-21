@@ -68,8 +68,8 @@ def load_manifest(path: pathlib.Path) -> Dict[str, Any]:
             executable.relative_to(root)
         except ValueError as exc:
             raise ValueError(f"stage command escapes manifest directory: {executable}") from exc
-        if not executable.is_file():
-            raise ValueError(f"stage command is not a file: {executable}")
+        if not executable.is_file() or not os.access(str(executable), os.X_OK):
+            raise ValueError(f"stage command is not an executable file: {executable}")
     profile = payload.get("environment_profile_id")
     if not isinstance(profile, str) or not profile:
         raise ValueError("environment_profile_id is required")
