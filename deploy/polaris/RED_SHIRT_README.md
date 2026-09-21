@@ -179,8 +179,21 @@ record, is written beneath
 
 ### Bounded autonomous Pepper campaign
 
-Stage the image-managed campaign tools under `$HOME/red-shirt-polaris/campaign-tools/`
-from the exact merged revision, preserving executable modes. Then submit the dedicated
+Stage these image-managed campaign tools under
+`$HOME/red-shirt-polaris/campaign-tools/` from the exact merged revision,
+preserving executable modes:
+
+- `red_shirt_host_bridge.sh`
+- `red_shirt_host_watcher.sh`
+- `red_shirt_host_client.sh`
+- `red_shirt_rank_wrapper.sh`
+- `red_shirt_gpu_rank_probe.py`
+- `red_shirt_mpi_env.sh`
+- `red_shirt_toolchain_stage.sh`
+- `red_shirt_toolchain_manifest.py`
+- `red_shirt_toolchain_preflight.py`
+
+Then submit the dedicated
 one-shot launcher with a reviewed instance wrapper that exports only non-secret paths
 (`SIF`, and optional `MAX_ATTEMPTS`/`HERMES_TIMEOUT`); do not use `qsub -v` for
 credentials:
