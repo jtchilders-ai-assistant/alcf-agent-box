@@ -51,6 +51,7 @@ COPY scripts/resolve_context_length.py /opt/red-shirt-polaris/resolve_context_le
 COPY scripts/red_shirt_config.py /opt/red-shirt-polaris/red_shirt_config.py
 COPY scripts/red_shirt_probe.py /opt/red-shirt-polaris/red_shirt_probe.py
 COPY scripts/red_shirt_task_context.py /opt/red-shirt-polaris/red_shirt_task_context.py
+COPY scripts/red_shirt_campaign.py /opt/red-shirt-polaris/red_shirt_campaign.py
 COPY scripts/red_shirt_entrypoint.sh /opt/red-shirt-polaris/entrypoint.sh
 COPY config/red-shirt-polaris/ /opt/red-shirt-polaris/config/
 COPY docs/polaris-snapshot/ /opt/red-shirt-polaris/docs/
