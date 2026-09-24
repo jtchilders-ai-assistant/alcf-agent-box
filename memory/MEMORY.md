@@ -234,15 +234,15 @@ Key facts:
   a multi-minute cold start per call and hop nodes), and it manages its own
   result wait. The CLI is only for when the tool is absent or you need
   non-default endpoint/queue/walltime/venv.
-- **ON by default; prompts for the Globus Compute login at container start**
-  (like IRI). Can be hard-disabled with `-e ALCF_ENABLE_GLOBUS_COMPUTE=0` (the
+- **ON by default and included in the ONE combined Globus login at container
+  start.** It can be hard-disabled with `-e ALCF_ENABLE_GLOBUS_COMPUTE=0` (the
   flag gates all Globus Compute access). If disabled, tell the user it was turned
   off and how to re-enable, then stop.
-- **Third, separate Globus login.** Distinct from the inference and IRI logins.
-  You (the agent) CANNOT complete it yourself. If `check` says login is missing,
-  ask the user to run on the host:
-  `docker exec -it <container> /opt/hermes/.venv/bin/python /opt/alcf/alcf_remote_bash.py authenticate`
-  Tokens cache at `~/.globus_compute/storage.db` on the volume.
+- The user must complete interactive authentication. If `check` says login is
+  missing, ask the user to renew all enabled ALCF credentials together on the
+  host:
+  `docker exec -it <container> /opt/hermes/.venv/bin/python /opt/alcf/alcf_combined_auth.py authenticate --force`
+  The shared token store persists on the `/opt/data` volume.
 - Always pass `--account <project>` (the PBS job is charged to it) and a
   `--queue` (default `debug`). MEPs: polaris + crux.
 - **First command is ~1 min** (the endpoint boots a PBS job); later commands
@@ -334,22 +334,6 @@ Confusing the two silently stages files to the wrong machine:
   expands on the node. After any failed step, scan the REST of your plan for
   the same mistake before continuing.
 
-## Background tasks & notifications (cron CANNOT message this chat)
-- Cron job output can NEVER appear in a TUI/dashboard conversation — delivery
-  goes only to gateway chat platforms (none configured by default) or to files
-  (`deliver: local` → `~/.hermes/cron/output/`). Never promise the user a
-  message "here" from a cron job.
-- For "watch X and then do Y": prefer a **self-continuing** cron job — it
-  checks the condition, and when met it DOES the next step itself (cron runs
-  are full agent sessions), reading/writing the persisted resume file — then
-  disables itself. Load the `alcf-background-tasks` skill for the full pattern.
-- **Never poll faster than every 5 min in agent mode** (tokens each run); use a
-  `--no-agent` script job for fast polls. Always give a watcher an end
-  condition and clean up stale jobs.
-- **Push notifications to the user's phone/desktop** are available via ntfy IF
-  `ALCF_NTFY_TOPIC` is set: `/opt/hermes/.venv/bin/python
-  /opt/alcf/alcf_notify.py send "..."` (`check` tells you if configured).
-  Status-level facts only — never tokens/secrets/file contents.
 
 ## ALCF systems (orientation)
 - Polaris, Aurora, Crux — HPC clusters, jobs run under PBS.
