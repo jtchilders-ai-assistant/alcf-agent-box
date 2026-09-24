@@ -485,9 +485,13 @@ def _has_tokens() -> bool:
 def cmd_check(args) -> int:
     enabled = _enabled()
     toks = _has_tokens()
+    if _combined is not None and _combined.compute_enabled():
+        token_store = _combined.TOKENS_PATH
+    else:
+        token_store = "~/.globus_compute/storage.db (standalone fallback)"
     print(f"globus compute      : {'enabled' if enabled else 'DISABLED (ALCF_ENABLE_GLOBUS_COMPUTE=0)'}")
     print(f"globus-compute login: {'present' if toks else 'MISSING (run: authenticate)'}")
-    print(f"token store         : ~/.globus_compute/storage.db")
+    print(f"token store         : {token_store}")
     print(f"endpoints           : " + ", ".join(f"{k}={v}" for k, v in MEPS.items()))
     # Non-zero exit if not ready, so the agent can branch on it.
     return 0 if (enabled and toks) else 1
@@ -499,10 +503,19 @@ def _preflight_run(args) -> int | None:
     _require_enabled()
     _import_sdk()
     if not _has_tokens():
+        if _combined is not None and _combined.compute_enabled():
+            auth_command = (
+                "docker exec -it <container> /opt/hermes/.venv/bin/python \\\n"
+                "      /opt/alcf/alcf_combined_auth.py authenticate --force"
+            )
+        else:
+            auth_command = (
+                "docker exec -it <container> /opt/hermes/.venv/bin/python \\\n"
+                "      /opt/alcf/alcf_remote_bash.py authenticate"
+            )
         print(
             "ERROR: no Globus Compute login. Run once on the host:\n"
-            "    docker exec -it <container> /opt/hermes/.venv/bin/python \\\n"
-            "      /opt/alcf/alcf_remote_bash.py authenticate",
+            f"    {auth_command}",
             file=sys.stderr,
         )
         return 3

@@ -11,6 +11,8 @@ web chat that can:
   ALCF-hosted open model (default `google/gemma-4-31B-it`).
 - **Submit and manage jobs** on ALCF systems (Polaris, Crux, Aurora) through the
   [IRI Facility API], plus filesystem operations on Home/Eagle.
+- **Run commands on ALCF compute nodes** through Globus Compute, using the
+  user's own account and allocation—without giving the container SSH access.
 
 It is built on [Hermes Agent] (Nous Research) — an open-source, provider-agnostic
 agent framework with persistent memory, skills, and a built-in web dashboard.
@@ -38,12 +40,12 @@ docker run -it --rm \
 
 On first run the container will:
 
-1. Ask you to authenticate to the **ALCF Inference Service** (Globus browser
-   login — it prints a URL, you log in, paste back a code).
-2. *(Optional, for job submission)* Ask you to authenticate to the **IRI
-   Facility API** — a **separate** Globus login. Set `-e ALCF_ENABLE_IRI=0` to
-   skip it and use chat only.
-3. Launch the web chat at **<https://localhost:8787>** (note **https**). Your
+1. Start **ONE combined Globus login** for the ALCF Inference Service, IRI
+   Facility API, and Globus Compute. It prints one URL; you log in and paste
+   back one authorization code. Set `-e ALCF_ENABLE_IRI=0` or
+   `-e ALCF_ENABLE_GLOBUS_COMPUTE=0` before the first run to omit an optional
+   capability from that consent.
+2. Launch the web chat at **<https://localhost:8787>** (note **https**). Your
    browser will show a one-time "not private" warning because the container uses
    a **self-signed certificate** — click **Advanced → proceed to localhost**.
    (HTTPS is required so the chat's copy/paste works — browsers only allow
@@ -91,12 +93,11 @@ Then ask the agent to read/write under `/work`. Only that directory is exposed.
 > (self-signed local cert) so the chat's clipboard works, and it requires the
 > username/password auth gate. Keep the published port bound to localhost.
 >
-> **IRI job submission:** the IRI Facility API uses a **separate** Globus login
-> from inference. If you skipped it at startup (or the agent reports it can't
-> find IRI credentials), run this once and follow the prompts:
+> **Reauthentication:** all enabled ALCF services share the combined login. If
+> the agent reports expired or missing credentials, renew them together:
 > ```bash
 > docker exec -it <container> \
->   /opt/hermes/.venv/bin/python /opt/alcf/alcf_facility_api_globus_token.py authenticate
+>   /opt/hermes/.venv/bin/python /opt/alcf/alcf_combined_auth.py authenticate --force
 > ```
 
 ### Compute-node shell (MCP `bash` tool) & subagents
@@ -126,7 +127,7 @@ like a real login shell. Recommended knobs at `docker run`:
 
 | Piece | Source | Purpose |
 |---|---|---|
-| Hermes Agent (official image) | `nousresearch/hermes-agent:latest` | Agent core + web dashboard (base image) |
+| Hermes Agent (official image) | `nousresearch/hermes-agent:v2026.7.30` | Agent core + web dashboard (pinned base image) |
 | Tool-message patch | `patches/0001-strip-tool-message-name.patch` | Enables agentic tool use on the ALCF gateway |
 | ALCF skills | `skills/` | How to call ALCF inference / IRI / PBS |
 | Knowledge seed | `memory/MEMORY.md` | Curated, **sanitized** ALCF facts (always injected) |
@@ -137,7 +138,7 @@ like a real login shell. Recommended knobs at `docker run`:
 
 ### Architecture: built on the official Hermes image
 
-This image is `FROM nousresearch/hermes-agent:latest` plus three thin layers
+This image is `FROM nousresearch/hermes-agent:v2026.7.30` plus three thin layers
 (patch, Globus auth helpers, ALCF content). We deliberately do **not** rebuild
 Hermes — the official image already handles the fixed SQLite build, s6-overlay
 supervision, the editable install, and the dashboard. See
@@ -170,27 +171,12 @@ running config at container start. Environment variables you can override at
 | `ALCF_DASHBOARD_PORT` | `8787` | Web chat port inside the container |
 | `ALCF_DASHBOARD_USER` | `alcf` | Dashboard login username |
 | `ALCF_DASHBOARD_PASSWORD` | *(auto-generated + printed)* | Dashboard login password (hashed at start; plaintext never stored) |
-| `ALCF_ENABLE_IRI` | `1` | Prompt for the second (IRI) Globus login |
+| `ALCF_ENABLE_IRI` | `1` | Include IRI in the combined first-run consent and enable job/filesystem tools |
+| `ALCF_ENABLE_GLOBUS_COMPUTE` | `1` | Include Globus Compute in the combined consent and enable compute-node execution |
 | `ALCF_ENABLE_METIS` | `1` | Include the Metis cluster's models in the switchable list |
 | `ALCF_ENABLE_MINERVA` | `1` | Include the Minerva cluster's models in the switchable list |
 | `ALCF_SHOW_MODEL_STATUS` | `1` | Print the model availability banner (LIVE/QUEUED/OFFLINE + context windows) at startup |
 | `ALCF_BASH_ACCOUNT` | *(unset)* | **Recommended:** your default ALCF project for the compute-node `bash` tool. When set, the agent holds ONE warm compute node across the whole conversation instead of paying repeated cold starts; when unset, it must ask/look up a project first. |
-| `ALCF_NTFY_TOPIC` | *(unset)* | Secret [ntfy](https://ntfy.sh) topic for push notifications (see below) |
-| `ALCF_NTFY_SERVER` | `https://ntfy.sh` | Self-hosted ntfy relay, if you run one |
-
-### Push notifications (ntfy)
-
-The chat surfaces (dashboard, TUI) are *pull* interfaces — a scheduled/cron job
-or a long build finishing in the background cannot message you there. If you
-want real "job started / build done" alerts on your phone or desktop, enable
-[ntfy](https://ntfy.sh): pick a hard-to-guess topic name (it acts as a
-password), subscribe to it in the ntfy app (or open `https://ntfy.sh/<topic>`),
-and start the container with `-e ALCF_NTFY_TOPIC=<topic>`. The agent then uses
-the baked `/opt/alcf/alcf_notify.py` helper (and its `alcf-background-tasks`
-skill) to push status-level alerts — job ids, states, exit codes — never
-tokens or file contents. Self-hosting ntfy? Point `ALCF_NTFY_SERVER` at your
-relay.
-
 ## What happens at container start
 
 `scripts/entrypoint.sh` is the launch script. On every start (not just the first
@@ -199,9 +185,10 @@ All of the ALCF-service calls below are **best-effort and non-fatal** — if the
 network or catalog is unavailable, each step falls back to a safe default rather
 than aborting the launch.
 
-1. **Globus authentication.** On first run, prompts for the **Inference Service**
-   login (and, unless `ALCF_ENABLE_IRI=0`, the separate **IRI Facility API**
-   login). Tokens are stored in the `/opt/data` volume; later starts reuse them.
+1. **Globus authentication.** On first run, performs ONE combined Globus login
+   for inference and the enabled IRI/Globus Compute capabilities. The consent
+   requests the distinct service scopes and both required ALCF session policies,
+   then stores the resulting per-service tokens in `/opt/data` for reuse.
 2. **Dashboard auth gate.** Hashes the dashboard password (from
    `ALCF_DASHBOARD_PASSWORD`, or an auto-generated one printed once). Hermes
    refuses a non-loopback bind without this gate.
@@ -354,6 +341,9 @@ directly via its `alcf-inference-service` skill.
 
 See [docs/DESIGN.md](docs/DESIGN.md) for architecture, the auth model, and the
 verification log (spike results proving inference + agentic tool use work).
+Experimental cluster-resident agents and development campaigns are maintained
+separately in the private `alcf-agent-experiments` repository; this repository
+contains only the laptop product.
 
 Build locally:
 

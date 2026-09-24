@@ -1,12 +1,7 @@
 name: Build and publish image
 
-# Builds the ALCF Agent image and publishes it to GitHub Container Registry.
-# Triggers:
-#   - push to main (rolling :latest)
-#   - version tags v*      (immutable :vX.Y.Z)
-#   - nightly (03:17 UTC)  after docs refresh, so :latest always carries fresh docs
-#   - manual dispatch
-
+# Build the user-facing ALCF Agent image and publish it to GHCR.
+# Non-product images are maintained outside this public repository.
 on:
   push:
     branches: [main]
@@ -21,8 +16,6 @@ permissions:
 
 env:
   IMAGE: ghcr.io/${{ github.repository_owner }}/alcf-agent
-  PROBE_IMAGE: ghcr.io/${{ github.repository_owner }}/alcf-agent-headscale-probe
-  RED_SHIRT_POLARIS_IMAGE: ghcr.io/${{ github.repository_owner }}/alcf-red-shirt-polaris
 
 jobs:
   build:
@@ -59,15 +52,8 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          # SHA-scoped GHA cache. The image bakes per-commit content (skills,
-          # MEMORY.md, config, the version stamp, helper scripts), so a cache
-          # shared ACROSS commits once published images two commits behind
-          # (COPY/ENV/ARG layers served from a stale cache). Scoping the cache
-          # to ${{ github.sha }} makes each commit its own namespace: the first
-          # build for a SHA is cold (rebuilds all content — correct), while
-          # re-runs of the SAME commit (e.g. a retried job) reuse it, and the
-          # heavy base layers (uv install, Caddy copy) are still cached within
-          # the run's multi-arch fan-out. No cross-commit staleness possible.
+          # Cache only within one commit. The image bakes commit-specific
+          # content, so cross-commit cache reuse can publish stale files.
           cache-from: type=gha,scope=${{ github.sha }}
           cache-to: type=gha,scope=${{ github.sha }},mode=max
           provenance: false
@@ -76,99 +62,3 @@ jobs:
           build-args: |
             ALCF_GIT_SHA=${{ github.sha }}
             ALCF_BUILD_DATE=${{ github.event.repository.updated_at }}
-
-  # ---------------------------------------------------------------------------
-  # Headscale probe image
-  # Separate minimal image: tailscale + connect_proxy + headscale_probe.sh
-  # Published as ghcr.io/<owner>/alcf-agent-headscale-probe
-  # ---------------------------------------------------------------------------
-  build-headscale-probe:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Compute headscale-probe tags
-        id: probe-meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.PROBE_IMAGE }}
-          tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=ref,event=tag
-            type=sha,format=short
-
-      - name: Set up QEMU (for cross-arch emulation)
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build and push headscale-probe image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile.headscale-probe
-          platforms: linux/amd64,linux/arm64
-          push: true
-          cache-from: type=gha,scope=headscale-probe-${{ github.sha }}
-          cache-to: type=gha,scope=headscale-probe-${{ github.sha }},mode=max
-          provenance: false
-          tags: ${{ steps.probe-meta.outputs.tags }}
-          labels: ${{ steps.probe-meta.outputs.labels }}
-
-  # ---------------------------------------------------------------------------
-  # Red Shirt Polaris compute image
-  # Dedicated minimal image for the resident Polaris compute agent: pinned
-  # Hermes base + pinned Tailscale, no dashboard entrypoint. Published as
-  # ghcr.io/<owner>/alcf-red-shirt-polaris, SHA-scoped like the other targets.
-  # ---------------------------------------------------------------------------
-  build-red-shirt-polaris:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Compute red-shirt-polaris tags
-        id: red-shirt-meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.RED_SHIRT_POLARIS_IMAGE }}
-          tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=ref,event=tag
-            type=sha,format=short
-
-      - name: Set up QEMU (for cross-arch emulation)
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build and push Red Shirt Polaris image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile.red-shirt-polaris
-          platforms: linux/amd64,linux/arm64
-          push: true
-          cache-from: type=gha,scope=red-shirt-polaris-${{ github.sha }}
-          cache-to: type=gha,scope=red-shirt-polaris-${{ github.sha }},mode=max
-          provenance: false
-          tags: ${{ steps.red-shirt-meta.outputs.tags }}
-          labels: ${{ steps.red-shirt-meta.outputs.labels }}
-          build-args: |
-            ALCF_GIT_SHA=${{ github.sha }}
-
