@@ -21,9 +21,9 @@ is Hermes + ALCF-specific content + a thin runtime wrapper, not a new framework.
 ```
         ┌─────────────────────────── container ───────────────────────────┐
         │                                                                  │
- laptop │  browser ─https://localhost:8787─▶ Caddy (TLS) ─▶ hermes         │
+ laptop │  browser ─http://localhost:8787──▶ Caddy (HTTP) ─▶ hermes        │
  ───────┼──────────────────────────────────────┬── dashboard (web chat)── │
-        │  (self-signed cert; HTTPS = clipboard)│    agent core (tools)    │
+        │  (loopback secure context = clipboard)│    agent core (tools)    │
         │   /opt/data (named volume) ───────────┤                          │
         │     ├─ .globus  → Globus tokens       │                          │
         │     └─ memory + config + sessions     │                          │
@@ -37,9 +37,9 @@ is Hermes + ALCF-specific content + a thin runtime wrapper, not a new framework.
 ```
 
 A single named volume (`alcf-agent-home` → `/opt/data`) holds Globus tokens
-*and* Hermes memory/config/sessions; Caddy terminates TLS on the public port
-(so the chat's clipboard works) and reverse-proxies to the dashboard on
-loopback inside the container.
+*and* Hermes memory/config/sessions; Caddy serves HTTP on the container port,
+which Docker publishes only on host `127.0.0.1`. Browsers treat localhost as a
+trustworthy secure context (so clipboard works) without local certificate setup.
 
 ## The LLM source: ALCF Inference Service (not Argo)
 

@@ -486,17 +486,17 @@ reauth_cmd="docker exec -it <container> \
   done
 ) &
 
-# --- 7. Launch: dashboard on loopback, Caddy (HTTPS) on the public port ------
-# The dashboard chat's copy/paste needs a browser "secure context", so we serve
-# it over HTTPS via Caddy (self-signed local cert). The dashboard itself binds
-# 127.0.0.1:<internal>, and Caddy terminates TLS on the public port and proxies.
+# --- 7. Launch: dashboard behind Caddy on a loopback-published HTTP port ------
+# Browsers treat http://localhost as a trustworthy secure context, so clipboard
+# access works without a local CA or certificate warning. Docker must publish
+# this public port on host 127.0.0.1 only, as shown in the README.
 PUB_PORT="${ALCF_DASHBOARD_PORT:-8787}"
 INT_PORT="${ALCF_DASHBOARD_INTERNAL_PORT:-9119}"
 mkdir -p "$XDG_DATA_HOME" "$XDG_CONFIG_HOME" 2>/dev/null || true
 
 log "Starting dashboard (internal) on 0.0.0.0:${INT_PORT} (auth gate ON)"
 # Bind 0.0.0.0 so Hermes engages the auth gate (loopback bind would skip it).
-# Only the public TLS port is published from the container, so the internal
+# Only the public proxy port is published from the container, so the internal
 # port is not directly reachable from the host — Caddy proxies to it.
 hermes dashboard --host 0.0.0.0 --port "$INT_PORT" --no-open &
 DASH_PID=$!
@@ -520,6 +520,6 @@ src, dst = sys.argv[1], sys.argv[2]
 open(dst, "w").write(string.Template(open(src).read()).safe_substitute(os.environ))
 PYEOF
 
-log "Web chat ready at https://localhost:${PUB_PORT}  (self-signed cert — click through the browser warning once)"
+log "Web chat ready at http://localhost:${PUB_PORT}"
 log "Login: user=${ALCF_DASHBOARD_USER}  (password you set via ALCF_DASHBOARD_PASSWORD)"
 exec caddy run --config /opt/data/Caddyfile --adapter caddyfile
