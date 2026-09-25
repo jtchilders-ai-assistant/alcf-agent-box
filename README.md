@@ -32,7 +32,7 @@ agent framework with persistent memory, skills, and a built-in web dashboard.
 
 ```bash
 docker run -it --rm \
-  -p 8787:8787 \
+  -p 127.0.0.1:8787:8787 \
   -e ALCF_DASHBOARD_PASSWORD='choose-a-password' \
   -v alcf-agent-home:/opt/data \
   ghcr.io/jtchilders-ai-assistant/alcf-agent:latest
@@ -46,11 +46,9 @@ On first run the container will:
    requests all four supported services (including Globus Transfer). The
    `ALCF_ENABLE_IRI` and `ALCF_ENABLE_GLOBUS_COMPUTE` flags disable the box's
    corresponding runtime features, not scopes in that combined consent.
-2. Launch the web chat at **<https://localhost:8787>** (note **https**). Your
-   browser will show a one-time "not private" warning because the container uses
-   a **self-signed certificate** — click **Advanced → proceed to localhost**.
-   (HTTPS is required so the chat's copy/paste works — browsers only allow
-   clipboard access on secure origins.) Log in with username `alcf` (override
+2. Launch the web chat at **<http://localhost:8787>**. Chrome treats localhost
+   as a trustworthy secure context, so chat copy/paste works without a local
+   certificate or browser warning. Log in with username `alcf` (override
    with `-e ALCF_DASHBOARD_USER=...`) and the password you set. If you don't set
    `ALCF_DASHBOARD_PASSWORD`, the container generates one and prints it at
    startup.
@@ -81,7 +79,7 @@ a **dedicated** directory (never your whole home):
 
 ```bash
 # creates/uses ~/alcf-work on your host, visible to the agent at /work
-docker run -it --rm -p 8787:8787 \
+docker run -it --rm -p 127.0.0.1:8787:8787 \
   -e ALCF_DASHBOARD_PASSWORD='choose-a-password' \
   -v alcf-agent-home:/opt/data \
   -v "$HOME/alcf-work:/work" \
@@ -90,9 +88,10 @@ docker run -it --rm -p 8787:8787 \
 
 Then ask the agent to read/write under `/work`. Only that directory is exposed.
 
-> **Security:** the dashboard runs behind a built-in **Caddy HTTPS** proxy
-> (self-signed local cert) so the chat's clipboard works, and it requires the
-> username/password auth gate. Keep the published port bound to localhost.
+> **Security:** publish the dashboard exactly as shown, on host `127.0.0.1`
+> only. Browsers grant `http://localhost` secure-context privileges for clipboard
+> access, while the dashboard username/password gate remains enabled. Do not
+> replace the mapping with `-p 8787:8787`, which exposes it on every interface.
 >
 > **Reauthentication:** all enabled ALCF services share the combined login. If
 > the agent reports expired or missing credentials, renew them with `alcf-tokens login`:
@@ -235,7 +234,7 @@ than aborting the launch.
    fresh inference token every 6h (tokens last 48h; a full re-auth is required
    every 30 days). If a refresh fails — usually the 30-day limit — it logs a loud
    banner and drops a status file the agent surfaces *in chat*. Then the Hermes
-   dashboard starts behind the Caddy HTTPS proxy.
+   dashboard starts behind the loopback-only Caddy HTTP proxy.
 
 ## Memory & documentation
 

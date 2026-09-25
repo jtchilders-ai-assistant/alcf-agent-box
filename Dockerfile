@@ -28,10 +28,9 @@ FROM ${HERMES_BASE}
 USER root
 
 # ---------------------------------------------------------------------------
-# 0. Caddy (TLS terminator). The dashboard chat's copy/paste uses the browser
-#    Clipboard API, which browsers gate to HTTPS ("secure context"). Caddy
-#    serves the dashboard over HTTPS with a local self-signed cert so paste
-#    works. Single static multi-arch binary copied from the official image.
+# 0. Caddy (loopback HTTP proxy). Browsers treat http://localhost as a secure
+#    context, so clipboard access works without local certificates. The host
+#    must publish the port on 127.0.0.1 only, as shown in the README.
 # ---------------------------------------------------------------------------
 COPY --from=caddy:2 /usr/bin/caddy /usr/bin/caddy
 COPY config/Caddyfile /opt/alcf/Caddyfile
@@ -138,14 +137,13 @@ ENV ALCF_MODEL=google/gemma-4-31B-it \
 
 EXPOSE 8787
 
-# Health: the public port is HTTPS (Caddy, self-signed) proxying to the
-# dashboard. `curl -k` tolerates the self-signed cert; we accept ANY HTTP
+# Health: the public port is HTTP through Caddy. We accept ANY HTTP
 # response (including the 401 auth challenge) as "server up" — we only care
 # that Caddy + the dashboard behind it are answering. start-period covers
 # first-run Globus auth + dashboard warmup.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
-  CMD curl -ks -o /dev/null -w '%{http_code}' \
-        "https://127.0.0.1:${ALCF_DASHBOARD_PORT}/" 2>/dev/null \
+  CMD curl -s -o /dev/null -w '%{http_code}' \
+        "http://127.0.0.1:${ALCF_DASHBOARD_PORT}/" 2>/dev/null \
       | grep -qE '^[1-5][0-9]{2}$' || exit 1
 
 # Our entrypoint does the ALCF first-run flow, then hands off to the stock
