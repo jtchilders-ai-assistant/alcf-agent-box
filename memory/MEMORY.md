@@ -29,8 +29,8 @@ version — always read the file.
   - Model/status discovery: GET /resource_server/list-endpoints,
     /resource_server/sophia/models, /resource_server/sophia/jobs (shows which
     models are hot/running).
-- Auth: Globus access token as `Authorization: Bearer <token>` (from
-  inference_auth_token.py). Tokens last 48h and auto-refresh; full re-auth every
+- Auth: Globus access token as `Authorization: Bearer ***` from the official
+  pinned `alcf-tokens` package. Tokens last 48h and auto-refresh; full re-auth every
   30 days.
 
 ### Inference token lifetime & expiry (how to recognize + fix)
@@ -55,15 +55,15 @@ To recognize + handle it:
 2. Tell the user to run this ONCE on their host, then chat works again:
 
        docker exec -it <container> \
-         /opt/hermes/.venv/bin/python /opt/alcf/inference_auth_token.py authenticate
+         /opt/hermes/.venv/bin/alcf-tokens login
 
    (or restart the container, which prompts for the login at startup). You (the
    agent) CANNOT complete this browser login yourself — hand the command to the
    user, same as the IRI login flow below.
 
-Note this is the INFERENCE login. The IRI login is separate (see below); an
-expired inference token does not affect an already-valid IRI token or vice
-versa.
+The official login obtains refreshable credentials for Inference, IRI, Globus
+Compute, and Globus Transfer in one browser visit. Re-running it renews the
+shared ALCF authorization session.
 - **HTTP 503 "online but not ready to receive tasks" = the model is COLD**, not
   broken. Cold models take 10-15 min to load on first request. Consistently-hot
   models (check GET /resource_server/sophia/jobs) include google/gemma-4-31B-it
@@ -83,37 +83,27 @@ versa.
   https://docs.alcf.anl.gov/services/iri-api/
 - Public (no auth): GET /status/resources, /facility, /status/events. Good
   smoke tests — you can call these WITHOUT any token.
-- Authenticated (Bearer Globus token, a SEPARATE login from inference): compute
+- Authenticated (Bearer Globus token from the combined official login): compute
   (/compute/*), filesystem (/filesystem/*), account (/account/*), tasks
   (/task/*).
 
 ### IRI authentication — HOW IT WORKS IN THIS CONTAINER (important)
-The IRI API uses its OWN Globus login, separate from the inference login. The
-helper script is vendored at:
-
-    /opt/alcf/alcf_facility_api_globus_token.py
-
-Run it with the bundled Python: `/opt/hermes/.venv/bin/python`.
-
-- Check for / get a token (auto-refreshes if present):
-      /opt/hermes/.venv/bin/python /opt/alcf/alcf_facility_api_globus_token.py get_access_token
-- The token is cached at:
-      $HOME/.globus/app/8b84fc2d-49e9-49ea-b54d-b3a29a70cf31/alcf_facility_api_app/tokens.json
-  (in this container $HOME = /opt/data, which is the persistent volume).
-- NOTE: this is a DIFFERENT file from the inference token (client id
-  58fdd3bc-…/inference_app). Having an inference token does NOT give you IRI
-  access — an inference token sent to api.alcf.anl.gov returns HTTP 401.
+IRI uses its own service credential obtained by the same official combined
+`alcf-tokens` login as Inference and Globus Compute. The package selects and
+refreshes the correct credential; do not reuse the Inference access token for
+IRI.
 
 CRITICAL — you (the agent) CANNOT complete the IRI login yourself. It is an
 INTERACTIVE browser flow: `authenticate` prints a URL the human must open, log
 in, and paste back a code. You have no browser and cannot paste the code. So:
-  1. First try `get_access_token`. If it prints a token, use it — you're done.
+  1. First use the bundled IRI client, which calls
+     `get_access_token("iri")` and refreshes automatically.
   2. If it errors with "Access token does not exist" / needs auth, DO NOT try
      to run `authenticate` yourself and wait — you'll just hang. Instead, tell
      the user to run this ONE command on their host and follow the prompts:
 
         docker exec -it <container-name> \
-          /opt/hermes/.venv/bin/python /opt/alcf/alcf_facility_api_globus_token.py authenticate
+          /opt/hermes/.venv/bin/alcf-tokens login
 
      (or restart the container with `-e ALCF_ENABLE_IRI=1`, which prompts for
      the IRI login at startup). Once they finish, the token lands in the volume
@@ -123,7 +113,7 @@ in, and paste back a code. You have no browser and cannot paste the code. So:
   full endpoint reference and a reusable client.
 
 ### ONE token for the WHOLE IRI API — there is NO separate "compute" scope
-The token from `alcf_facility_api_globus_token.py` requests the scope
+The IRI credential requests the scope
 `https://auth.globus.org/scopes/6be511f6-…/filesystem`. Despite the word
 "filesystem" in the scope name, this SAME token is used for `/compute/*`,
 `/account/*`, AND `/filesystem/*`. The IRI OpenAPI spec defines a single
@@ -211,10 +201,8 @@ Returns HTTP 200 with a PBS job id + state `queued`; poll it to `active` →
 - Get the user's project/account and username from `GET /account/projects`
   (returns projects with `name` = the account and `user_ids` list) — don't ask
   the user for these if you can look them up.
-- You do NOT need to build a venv or curl anything: the auth helper is baked at
-  `/opt/alcf/alcf_facility_api_globus_token.py` and its deps (globus-sdk,
-  requests) are already installed in `/opt/hermes/.venv`. Just run it with
-  `/opt/hermes/.venv/bin/python`.
+- You do NOT need to build a venv or curl anything: the official package and
+  its dependencies are installed in `/opt/hermes/.venv`.
 
 ## Building & running software on ALCF (remote-bash — OPT-IN)
 You can run arbitrary shell commands on an ALCF **compute node** — compile,
@@ -241,7 +229,7 @@ Key facts:
 - The user must complete interactive authentication. If `check` says login is
   missing, ask the user to renew all enabled ALCF credentials together on the
   host:
-  `docker exec -it <container> /opt/hermes/.venv/bin/python /opt/alcf/alcf_combined_auth.py authenticate --force`
+  `docker exec -it <container> /opt/hermes/.venv/bin/alcf-tokens login`
   The shared token store persists on the `/opt/data` volume.
 - Always pass `--account <project>` (the PBS job is charged to it) and a
   `--queue` (default `debug`). MEPs: polaris + crux.

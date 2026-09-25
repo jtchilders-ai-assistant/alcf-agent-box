@@ -15,12 +15,13 @@ reachable from a laptop off the ANL network — no VPN required (only a valid Gl
 Load whenever the task is "call the ALCF inference service", "use ALCF inference for
 chat/embeddings", "point an agent/OpenAI client at ALCF inference", or "what models are
 hot on Sophia/Metis". DIFFERENT system from Argo (`argonne-argo-api`) and the IRI Facility
-API (`alcf-iri-facility-api`) — different host, and a SEPARATE Globus login from IRI.
+API (`alcf-iri-facility-api`) — different host and service credential. Agent in a
+Box obtains both credentials in one official `alcf-tokens` login.
 
 - **Web UI (Open WebUI):** https://inference.alcf.anl.gov/ — log in with ANL/ALCF creds, pick a model, chat.
 - **API host:** `https://inference-api.alcf.anl.gov`  ← the REST API. NOT `inference.alcf.anl.gov`.
 - **Docs:** https://docs.alcf.anl.gov/services/inference-endpoints/
-- **Auth helper repo:** https://github.com/argonne-lcf/inference-endpoints (`inference_auth_token.py`)
+- **Auth package:** https://pypi.org/project/alcf-tokens/ (`alcf-tokens==0.3.0` in this image)
 - **Auth:** Globus OAuth2, command-line login flow. Access tokens valid 48h (auto-refresh);
   re-auth required every 30 days.
 
@@ -53,31 +54,27 @@ dynamically-loaded models unload after 2h idle).
 
 ## Authentication (Globus command-line flow)
 
-Same mechanism/shape as the IRI API auth script but a **DIFFERENT Globus scope/app**
-(see pitfalls). Interactive: prints a URL, you log in in a browser, paste the code back.
+Inference and IRI use different resource-server credentials, obtained together
+by the official combined login. Interactive login prints a URL, you log in in a browser, paste the code back.
 Works headless (redirect_uri is `auth.globus.org/v2/web/auth-code`, i.e. code-on-screen,
 not a localhost redirect), so it runs fine inside a container / over PTY.
 
-    python3 -m venv venv && source venv/bin/activate
-    pip install openai globus_sdk requests
-    curl -sL https://raw.githubusercontent.com/argonne-lcf/inference-endpoints/refs/heads/main/inference_auth_token.py -o inference_auth_token.py
-    python inference_auth_token.py authenticate                       # interactive: URL + paste code
-    token=$(python inference_auth_token.py get_access_token)          # 48h, auto-refresh
-    python inference_auth_token.py get_time_until_token_expiration --units hours
+    alcf-tokens login                         # one login for all ALCF services
+    token=$(alcf-tokens get-token inference)  # 48h, auto-refresh
 
-Tokens cache at `~/.globus/app/58fdd3bc-e1c3-4ce5-80ea-8d6b87cfb944/inference_app/tokens.json`.
-Force re-login: `python inference_auth_token.py authenticate --force` (after logout at
+Tokens persist under the official package's Globus app store on the mounted home volume.
+Re-login with `alcf-tokens login` (after logout at
 app.globus.org/logout — needed if you see `IdentityMismatchError` or `token not active`).
 
 ### Driving the interactive auth from a Hermes session (the working pattern)
 
 Each run generates a FRESH PKCE `code_challenge`, so a URL from a previously-killed process
 is useless. Do it live:
-1. Start auth as a **background PTY process**: `terminal(background=true, pty=true, command="... python inference_auth_token.py authenticate")`.
+1. Start auth as a **background PTY process**: `terminal(background=true, pty=true, command="alcf-tokens login")`.
 2. `process(action=wait, timeout=8)` to capture the printed URL.
 3. Hand the user THAT URL; wait for them to paste the code.
 4. `process(action=submit, data="<code>", session_id=...)` — sends code + Enter.
-5. `process(action=wait)` — exit 0 = success. Verify with `get_access_token`.
+5. `process(action=wait)` — exit 0 = success. Verify with `alcf-tokens test-token inference`.
 
 ## Chat completion (OpenAI-compatible)
 
@@ -114,7 +111,7 @@ this — it splits each cluster into a baseline provider (`max_tokens` 2048) and
     model:
       provider: custom
       base_url: https://inference-api.alcf.anl.gov/resource_server/sophia/vllm/v1
-      api_key: <globus access token>     # NOT static — 48h rotating; refresh from inference_auth_token.py
+      api_key: <globus access token>     # NOT static — 48h rotating; refresh via alcf-tokens
       model: openai/gpt-oss-120b
 
 The rotating token means `api_key` can't be a durable literal — a wrapper/entrypoint must
@@ -125,10 +122,9 @@ fetch a fresh token (`get_access_token`) and inject it before/at session start.
 - **Wrong host = HTML.** `inference.alcf.anl.gov` (web UI) returns `<!doctype html>` for
   every path. API calls MUST target `inference-api.alcf.anl.gov`.
 - **`wget` is not on stock macOS** — the docs use `wget` for the auth script; use `curl -sL ... -o`.
-- **Separate Globus login from IRI.** An inference token sent to `api.alcf.anl.gov`
-  (IRI) authed endpoints returns HTTP 401 `Globus token not active`. Inference uses client
-  `58fdd3bc-...` / scope `681c10cc-.../action_all`; IRI uses its own scope. A user-facing
-  agent that does BOTH chat and job submission needs TWO interactive Globus logins.
+- **Distinct credential, shared login.** An inference token sent to `api.alcf.anl.gov`
+  (IRI) returns HTTP 401; select the IRI credential instead. The image's default
+  `alcf-tokens login` obtains both credentials in one interactive flow.
 - **Cold model latency.** First call to an unloaded model can take 10–15 min. Check
   `sophia/jobs` for a hot model first, or expect a long first request.
 - **Not Argo, not AmSC.** Argo (`apps-stage.inside.anl.gov/argoapi`, username-as-key,
@@ -139,9 +135,9 @@ fetch a fresh token (`get_access_token`) and inject it before/at session start.
 
 - `scripts/probe_inference.sh` — re-runnable end-to-end probe (token -> list-endpoints ->
   hot-model discovery -> chat completion) with PASS/FAIL summary. Run it to verify the
-  service + your token in one shot: `./scripts/probe_inference.sh <dir-with-auth-script>`.
+  service + your token in one shot: `./scripts/probe_inference.sh`.
 
 ## See also
 
 - `argonne-argo-api` — the ANL-staff-only LLM gateway (different host + auth).
-- `alcf-iri-facility-api` — job submission / filesystem via Globus (separate token).
+- `alcf-iri-facility-api` — job submission / filesystem via a distinct credential from the same login.

@@ -58,14 +58,16 @@ RUN cd /opt/hermes \
     && rm -rf /tmp/alcf
 
 # ---------------------------------------------------------------------------
-# 2. ALCF Globus auth helpers + deps. The base image's venv is uv-managed
-#    (no pip binary), so install with `uv pip` into that interpreter. requests
-#    is already present in the base; globus-sdk is added here.
+# 2. Official alcf-tokens package + Globus Compute SDK. The base image's venv
+#    is uv-managed (no pip binary), so install with `uv pip`. alcf-tokens
+#    provides the `alcf-tokens` CLI (login / get-token) and the
+#    `alcf_tokens.auth` Python API (get_access_token / get_service_authorizer)
+#    used by the runtime helpers. Pin the exact released wheel for
+#    reproducibility; bump deliberately after verifying the new version's
+#    scope/policy contract.
 # ---------------------------------------------------------------------------
-RUN uv pip install --python /opt/hermes/.venv/bin/python --no-cache globus-sdk requests globus-compute-sdk
-COPY scripts/alcf_combined_auth.py /opt/alcf/alcf_combined_auth.py
-COPY scripts/inference_auth_token.py /opt/alcf/inference_auth_token.py
-COPY scripts/alcf_facility_api_globus_token.py /opt/alcf/alcf_facility_api_globus_token.py
+RUN uv pip install --python /opt/hermes/.venv/bin/python --no-cache \
+    alcf-tokens==0.3.0 globus-compute-sdk requests
 
 # ---------------------------------------------------------------------------
 # 3. ALCF content (changes most often -> last for cache friendliness).
@@ -85,9 +87,7 @@ COPY scripts/alcf_remote_bash.py /opt/alcf/alcf_remote_bash.py
 COPY scripts/alcf_bash_mcp.py /opt/alcf/alcf_bash_mcp.py
 COPY scripts/resolve_context_length.py /opt/alcf/resolve_context_length.py
 COPY scripts/populate_models.py /opt/alcf/populate_models.py
-RUN chmod +x /opt/alcf/entrypoint.sh /opt/alcf/alcf_combined_auth.py \
-             /opt/alcf/inference_auth_token.py \
-             /opt/alcf/alcf_facility_api_globus_token.py /opt/alcf/iri_hello_world.py \
+RUN chmod +x /opt/alcf/entrypoint.sh /opt/alcf/iri_hello_world.py \
              /opt/alcf/alcf_facility.py /opt/alcf/alcf_remote_bash.py \
              /opt/alcf/alcf_bash_mcp.py \
              /opt/alcf/resolve_context_length.py /opt/alcf/populate_models.py \

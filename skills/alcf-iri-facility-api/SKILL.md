@@ -1,6 +1,6 @@
 ---
 name: alcf-iri-facility-api
-description: Interact with the ALCF IRI Facility API (api.alcf.anl.gov) — the DOE IRI-standard REST API for ALCF compute (Polaris/Crux job submit/status/cancel), filesystem ops on Home/Eagle (async task model), account/projects/allocations, and facility/resource status. Covers the Globus command-line auth flow (get a 48h access token via the alcf_facility_api_globus_token.py script), how to drive the async filesystem task lifecycle, the per-identity path allowlist, and which OpenAPI routes are live vs 501 stubs. Load whenever the task is "call the ALCF IRI API", "submit/check/cancel a job via the facility API", "validate the IRI API", "list my ALCF projects/allocations via API", or any direct interaction with api.alcf.anl.gov. This is a DIFFERENT system from Argo (LLM inference, see argonne-argo-api) and AmSC (see amsc-interfaces) — different endpoint and auth (Globus, not ANL-username or Ping/Dex).
+description: Interact with the ALCF IRI Facility API (api.alcf.anl.gov) — compute jobs, filesystem operations, account data, and facility status. Uses the official alcf-tokens Globus credential in Agent in a Box.
 category: research
 ---
 
@@ -15,7 +15,7 @@ allocation metadata, and facility/resource status.
 - **OpenAPI spec:** `https://api.alcf.anl.gov/openapi.json` (title "ALCF implementation of the IRI Facility API")
 - **User docs:** https://docs.alcf.anl.gov/services/iri-api/
 - **Auth:** Globus (OAuth2, command-line login flow). Access tokens valid 48h, auto-refreshing.
-- **Auth script repo:** https://github.com/argonne-lcf/alcf-facility-api-token (`alcf_facility_api_globus_token.py`)
+- **Auth package:** https://pypi.org/project/alcf-tokens/ (`alcf-tokens==0.3.0` in this image)
 
 ## Stable resource IDs (verified live 2026-07)
 
@@ -36,7 +36,7 @@ Never hardcode blindly — re-verify with `GET /status/resources` (no auth requi
 
 ## Authentication (Globus command-line flow)
 
-The auth script uses `globus_sdk.UserApp` with the **command-line login flow**: it prints a URL,
+The official package uses `globus_sdk.UserApp` with the **command-line login flow**: it prints a URL,
 you open it in a browser + log in with ALCF creds, then paste the resulting authorization code
 back into the waiting process. It does NOT spin up a local browser server, so it works headless
 — but it is INTERACTIVE and cannot complete non-interactively (no way to script the code entry).
@@ -44,14 +44,10 @@ back into the waiting process. It does NOT spin up a local browser server, so it
 Full driving procedure (setup + PTY-based interactive auth) is in
 `references/iri-api-validation.md`. Quick version:
 
-    python3 -m venv venv && source venv/bin/activate
-    pip install globus-sdk requests
-    # download alcf_facility_api_globus_token.py (see scripts/ for a copy pointer)
-    python alcf_facility_api_globus_token.py authenticate      # interactive: URL + paste code
-    access_token=$(python alcf_facility_api_globus_token.py get_access_token)   # 48h, auto-refresh
-    python alcf_facility_api_globus_token.py get_time_until_token_expiration --units hours
+    alcf-tokens login                    # one login for all ALCF services
+    access_token=$(alcf-tokens get-token iri)  # 48h, auto-refresh
 
-Tokens cache at `~/.globus/app/8b84fc2d-49e9-49ea-b54d-b3a29a70cf31/alcf_facility_api_app/tokens.json`.
+Tokens persist under the official package's Globus app store on the mounted home volume.
 
 ### Driving the interactive auth from a Hermes session (the working pattern)
 
@@ -59,11 +55,11 @@ You cannot pipe the code in ahead of time — each run generates a FRESH PKCE `c
 so a URL from a previously-killed process is useless (its code fails with
 `invalid_grant: code_verifier does not match`). Instead:
 
-1. Start the auth as a **background PTY process**: `terminal(background=true, pty=true, command="... python alcf_facility_api_globus_token.py authenticate")`.
+1. Start auth as a **background PTY process**: `terminal(background=true, pty=true, command="alcf-tokens login")`.
 2. `process(action=wait, timeout=8)` to capture the URL it prints.
 3. Give the user THAT URL. Wait for them to paste the code back.
 4. `process(action=submit, data="<code>", session_id=...)` — submit sends the code + Enter.
-5. `process(action=wait)` — exit code 0 = success. Verify with `get_access_token`.
+5. `process(action=wait)` — exit code 0 = success. Verify with `alcf-tokens test-token iri`.
 
 ## Compute job lifecycle (Polaris/Crux)
 
@@ -130,11 +126,9 @@ in the task, not the submit response — a submit can return 200 while the task 
   `extract`/`upload`/`download` — untested). Don't assume a spec route works; probe it.
 - **Not Argo, not AmSC.** Argo = LLM inference (username-as-key). AmSC MAG = LiteLLM proxy
   (Ping/Dex). IRI Facility API = Globus auth. Three distinct ANL systems.
-- **Separate Globus login from the ALCF Inference Service.** Both use Globus + a token
-  script, but they are DIFFERENT scopes/apps — a token from `inference_auth_token.py`
-  (the inference service, see `alcf-inference-service`) sent to `api.alcf.anl.gov` authed
-  endpoints returns HTTP 401 `Globus token not active`, and vice-versa. An agent that does
-  BOTH chat inference AND job submission needs TWO interactive Globus logins, not one.
+- **Distinct credential, shared login.** An Inference token sent to IRI returns
+  HTTP 401 and vice versa; select the credential for the target service. The
+  image's default `alcf-tokens login` obtains both in one interactive flow.
 
 ## Files
 
