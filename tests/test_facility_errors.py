@@ -145,9 +145,10 @@ class JobsAuthFailureTests(unittest.TestCase):
         self.assertIn("alcf.anl.gov", err)
         self.assertIn("incognito", err)
 
-    def test_names_the_right_login_of_the_three(self):
+    def test_names_the_official_combined_login(self):
         _, _, err = _Capture(self.resp).run()
-        self.assertIn("alcf_facility_api_globus_token.py", err)
+        self.assertIn("alcf-tokens login", err)
+        self.assertNotIn("alcf_facility_api_globus_token.py", err)
 
 
 class JobsHappyPathTests(unittest.TestCase):

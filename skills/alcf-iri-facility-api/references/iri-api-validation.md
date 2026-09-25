@@ -4,7 +4,11 @@ End-to-end validation of every documented command at https://docs.alcf.anl.gov/s
 against the live API. All 18 documented endpoints worked. Issues below are doc gaps / rough
 edges, not broken functionality.
 
-## Setup that worked
+## Historical setup used for this validation
+
+The commands below document the original July validation and its old standalone
+helper. Agent in a Box now uses pinned `alcf-tokens==0.3.0`; run
+`alcf-tokens login` and `alcf-tokens get-token iri` for current authentication.
 
     mkdir -p /tmp/iri_test && cd /tmp/iri_test
     python3 -m venv venv && source venv/bin/activate

@@ -54,22 +54,25 @@ Argo is ANL-staff-only; this agent is for **users**. The ALCF Inference Service
 
 ## Auth model (the load-bearing constraint)
 
-The three runtime services use distinct Globus resource-server scopes, but the
-entrypoint requests them in **one combined Globus login**:
+The three runtime services use distinct Globus resource-server scopes. The
+entrypoint uses the official **`alcf-tokens`** package (pinned at `==0.3.0`) to
+request them all in **one combined Globus login** (`alcf-tokens login`):
 
-| Service | Helper script | Token used for |
+| Service | Python API | Token used for |
 |---|---|---|
-| Inference | `inference_auth_token.py` | The agent's LLM calls (as `api_key`) |
-| IRI API | `alcf_facility_api_globus_token.py` | Job submission, filesystem ops |
-| Globus Compute | `alcf_combined_auth.py` | Compute-node command execution |
+| Inference | `alcf_tokens.auth.get_access_token('inference')` | The agent's LLM calls (as `api_key`) |
+| IRI API | `alcf_tokens.auth.get_access_token('iri')` | Job submission, filesystem ops |
+| Globus Compute | `alcf_tokens.auth.get_service_authorizer('globus-compute')` | Compute-node command execution |
 
-Each API still receives its own token. `alcf_combined_auth.py` is the sole token
-authority because refresh tokens are client-bound; it requests both the
-Inference and IRI session policies in the same consent. Tokens last 48h and
-auto-refresh; a full re-auth is required every 30 days.
+The default `alcf-tokens login` always requests all four ALCF services
+(Inference, IRI, Globus Compute, and Transfer) per ALCF policy — feature flags
+(`ALCF_ENABLE_IRI`, `ALCF_ENABLE_GLOBUS_COMPUTE`) gate runtime feature exposure
+but do not narrow the consent. Tokens last 48h and auto-refresh; a full
+re-auth via `alcf-tokens login` is required every 30 days. Note: `alcf-tokens
+login` has no `--force` flag; simply re-run to trigger a new login.
 
 Consequences baked into the design:
-- **No credentials in the image.** First run does one interactive Globus login;
+- **No credentials in the image.** First run does one interactive `alcf-tokens login`;
   tokens live in the mounted `~/.globus` volume.
 - The entrypoint runs a **token-refresh loop** (every 6h) that re-renders the
   Hermes config with a fresh inference access token, because the token is the
@@ -166,13 +169,10 @@ All proven with real execution, not description:
 Dockerfile                         patched-Hermes install + content, layered
 config/config.template.yaml        single ALCF inference target + both fixes
 config/SOUL.md                     agent identity + "what can I do" greeting (seeded to $HERMES_HOME/SOUL.md)
-scripts/entrypoint.sh              first-run auth, config render + dynamic model list, floor/launch-provider guards, refresh loop, launch
-scripts/alcf_combined_auth.py      one login and one refresh authority for inference, IRI, and Globus Compute
+scripts/entrypoint.sh              first-run alcf-tokens login, config render + dynamic model list, floor/launch-provider guards, refresh loop, launch
 scripts/populate_models.py         generates the switchable model list from the live ALCF catalog (reasoning split, 64k floor, --hot-report, --launch-provider)
 scripts/resolve_context_length.py  resolves a model's real serving window (max_model_len) for the context-floor guard
 scripts/fetch_docs.py              pulls ALCF user-guides markdown into docs/
-scripts/inference_auth_token.py    vendored Globus helper (inference)
-scripts/alcf_facility_api_globus_token.py  vendored Globus helper (IRI)
 scripts/iri_hello_world.py         one-shot IRI job submitter (write; consumes allocation)
 scripts/alcf_facility.py           read-only helper: system status, my jobs, job output, allocations
 skills/                            alcf-inference-service, alcf-iri-facility-api, alcf-pbs..., alcf-facility-status-and-jobs

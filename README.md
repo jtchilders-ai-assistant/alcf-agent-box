@@ -42,9 +42,10 @@ On first run the container will:
 
 1. Start **ONE combined Globus login** for the ALCF Inference Service, IRI
    Facility API, and Globus Compute. It prints one URL; you log in and paste
-   back one authorization code. Set `-e ALCF_ENABLE_IRI=0` or
-   `-e ALCF_ENABLE_GLOBUS_COMPUTE=0` before the first run to omit an optional
-   capability from that consent.
+   back one authorization code. The official package's combined login always
+   requests all four supported services (including Globus Transfer). The
+   `ALCF_ENABLE_IRI` and `ALCF_ENABLE_GLOBUS_COMPUTE` flags disable the box's
+   corresponding runtime features, not scopes in that combined consent.
 2. Launch the web chat at **<https://localhost:8787>** (note **https**). Your
    browser will show a one-time "not private" warning because the container uses
    a **self-signed certificate** — click **Advanced → proceed to localhost**.
@@ -94,11 +95,14 @@ Then ask the agent to read/write under `/work`. Only that directory is exposed.
 > username/password auth gate. Keep the published port bound to localhost.
 >
 > **Reauthentication:** all enabled ALCF services share the combined login. If
-> the agent reports expired or missing credentials, renew them together:
+> the agent reports expired or missing credentials, renew them with `alcf-tokens login`:
 > ```bash
 > docker exec -it <container> \
->   /opt/hermes/.venv/bin/python /opt/alcf/alcf_combined_auth.py authenticate --force
+>   /opt/hermes/.venv/bin/alcf-tokens login
 > ```
+> The official `alcf-tokens login` default always requests all four ALCF services
+> (Inference, IRI, Globus Compute, and Transfer) in one browser visit. One fresh
+> login is sufficient after an upgrade (the client ID changed).
 
 ### Compute-node shell (MCP `bash` tool) & subagents
 
@@ -171,8 +175,8 @@ running config at container start. Environment variables you can override at
 | `ALCF_DASHBOARD_PORT` | `8787` | Web chat port inside the container |
 | `ALCF_DASHBOARD_USER` | `alcf` | Dashboard login username |
 | `ALCF_DASHBOARD_PASSWORD` | *(auto-generated + printed)* | Dashboard login password (hashed at start; plaintext never stored) |
-| `ALCF_ENABLE_IRI` | `1` | Include IRI in the combined first-run consent and enable job/filesystem tools |
-| `ALCF_ENABLE_GLOBUS_COMPUTE` | `1` | Include Globus Compute in the combined consent and enable compute-node execution |
+| `ALCF_ENABLE_IRI` | `1` | Enable IRI job/filesystem tools (the official combined login still requests the IRI credential when disabled) |
+| `ALCF_ENABLE_GLOBUS_COMPUTE` | `1` | Enable compute-node execution (the official combined login still requests the Compute credential when disabled) |
 | `ALCF_ENABLE_METIS` | `1` | Include the Metis cluster's models in the switchable list |
 | `ALCF_ENABLE_MINERVA` | `1` | Include the Minerva cluster's models in the switchable list |
 | `ALCF_SHOW_MODEL_STATUS` | `1` | Print the model availability banner (LIVE/QUEUED/OFFLINE + context windows) at startup |
@@ -185,10 +189,10 @@ All of the ALCF-service calls below are **best-effort and non-fatal** — if the
 network or catalog is unavailable, each step falls back to a safe default rather
 than aborting the launch.
 
-1. **Globus authentication.** On first run, performs ONE combined Globus login
-   for inference and the enabled IRI/Globus Compute capabilities. The consent
-   requests the distinct service scopes and both required ALCF session policies,
-   then stores the resulting per-service tokens in `/opt/data` for reuse.
+1. **Globus authentication.** On first run, the pinned official
+   `alcf-tokens==0.3.0` package performs ONE combined Globus login for Inference,
+   IRI, Globus Compute, and Globus Transfer. It applies the ALCF all-services
+   policy and stores refreshable per-service credentials in `/opt/data`.
 2. **Dashboard auth gate.** Hashes the dashboard password (from
    `ALCF_DASHBOARD_PASSWORD`, or an auto-generated one printed once). Hermes
    refuses a non-loopback bind without this gate.

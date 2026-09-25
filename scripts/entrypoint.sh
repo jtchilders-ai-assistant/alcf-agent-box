@@ -2,25 +2,25 @@
 # ALCF Agent container entrypoint (Option A: on top of nousresearch/hermes-agent).
 #
 #   1. Resolve the ALCF inference base_url from ALCF_CLUSTER.
-#   2. First-run: ONE combined Globus login authenticates ALL enabled ALCF
-#      services at once (Inference always; IRI unless ALCF_ENABLE_IRI=0; Globus
-#      Compute unless ALCF_ENABLE_GLOBUS_COMPUTE=0) — a single browser visit and
-#      a single pasted code (see alcf_combined_auth.py).
-#   3. Render the Hermes config with a fresh inference access token (Python, so
-#      no envsubst dependency).
+#   2. First-run: ONE combined Globus login via the official alcf-tokens CLI
+#      authenticates ALL ALCF services (Inference + IRI + Globus Compute +
+#      Transfer) in a single browser visit and a single pasted code. The
+#      default login always requests all four services; feature flags
+#      (ALCF_ENABLE_IRI, ALCF_ENABLE_GLOBUS_COMPUTE) gate RUNTIME exposure
+#      but do not narrow the consent.
+#   3. Render the Hermes config with a fresh inference access token.
 #   4. Seed skills + curated MEMORY.md into $HERMES_HOME (idempotent).
 #   5. Background token-refresh loop (tokens last 48h; refresh every 6h).
 #   6. Launch the Hermes web dashboard (the local web chat).
 #
-# $HERMES_HOME (/opt/data) and ~/.globus persist across restarts, so steps 1-2
-# are skipped once tokens exist.
+# $HERMES_HOME (/opt/data) and ~/.globus persist across restarts, so step 2
+# is skipped once tokens exist.
 set -euo pipefail
 
 ALCF_DIR=/opt/alcf
-INFER_AUTH="$ALCF_DIR/inference_auth_token.py"
-IRI_AUTH="$ALCF_DIR/alcf_facility_api_globus_token.py"
-COMBINED_AUTH="$ALCF_DIR/alcf_combined_auth.py"
-PY=/opt/hermes/.venv/bin/python
+VENV_BIN=/opt/hermes/.venv/bin
+PY="$VENV_BIN/python"
+ALCF_TOKENS="$VENV_BIN/alcf-tokens"
 HERMES_HOME="${HERMES_HOME:-/opt/data}"
 CONFIG_OUT="$HERMES_HOME/config.yaml"
 
@@ -58,34 +58,28 @@ export ALCF_BASE_URL
 mkdir -p "$HERMES_HOME"
 
 # --- 2. First-run Globus auth (interactive, idempotent) ---------------------
-# ONE combined Globus login now covers ALL enabled ALCF services in a single
-# browser visit + single pasted code:
-#   * ALCF Inference Service (always; the token IS the LLM api_key)
-#   * IRI Facility API        (unless ALCF_ENABLE_IRI=0)
-#   * Globus Compute          (unless ALCF_ENABLE_GLOBUS_COMPUTE=0)
-# alcf_combined_auth.py requests all enabled scopes + BOTH required ALCF identity
-# policies in one consent, and is the single source of every service's tokens
-# (refresh tokens are client-bound, so one app must own them all). This replaces
-# the previous three separate logins.
-authed_inference() { "$PY" "$COMBINED_AUTH" get_access_token --service inference >/dev/null 2>&1; }
+# ONE alcf-tokens login covers ALL ALCF services (Inference, IRI, Globus
+# Compute, and Transfer) in a single browser visit + single pasted code.
+# This is the official ALCF policy as of alcf-tokens==0.3.0: the default
+# login always requests all four services. Feature flags (ALCF_ENABLE_IRI,
+# ALCF_ENABLE_GLOBUS_COMPUTE) gate RUNTIME feature exposure but do NOT alter
+# the consent scope — one fresh login is all that is needed on upgrade.
+# Note: alcf-tokens login has no --force flag; re-run to trigger a new login.
+authed_inference() { "$ALCF_TOKENS" get-token inference >/dev/null 2>&1; }
 
 if ! authed_inference; then
-  _svcs="Inference Service"
-  [[ "${ALCF_ENABLE_IRI:-1}" != "0" ]] && _svcs="$_svcs + IRI Facility API"
-  [[ "${ALCF_ENABLE_GLOBUS_COMPUTE:-1}" != "0" ]] && _svcs="$_svcs + Globus Compute"
-  log "First-time setup: ONE Globus login for: $_svcs"
+  log "First-time setup: ONE Globus login for all ALCF services"
+  log "(Inference + IRI + Globus Compute + Transfer — ALCF policy default)"
   log "A single URL will be printed — open it, log in with your ALCF/Globus"
   log "account, and paste the ONE authorization code back here."
-  log "(Disable IRI with -e ALCF_ENABLE_IRI=0, Globus Compute with"
-  log " -e ALCF_ENABLE_GLOBUS_COMPUTE=0, before this login.)"
   echo
-  "$PY" "$COMBINED_AUTH" authenticate
+  "$ALCF_TOKENS" login
   echo
   if ! authed_inference; then
     err "ALCF authentication failed. Re-run the container to try again."
     exit 1
   fi
-  log "ALCF authentication OK (single login covered all enabled services)."
+  log "ALCF authentication OK (single login covered all services)."
 fi
 
 # --- 3. Dashboard auth (required for a container 0.0.0.0 bind) ---------------
@@ -105,12 +99,12 @@ export ALCF_DASHBOARD_PASSWORD_HASH="$("$PY" -c "from plugins.dashboard_auth.bas
 # --- 4. Render config (Python; no envsubst in the base image) ---------------
 render_config() {
   local token ctxlen providers_block
-  token="$("$PY" "$INFER_AUTH" get_access_token)"
+  token="$("$ALCF_TOKENS" get-token inference)"
   # Resolve the REAL serving context window for the LAUNCH model from the
   # server's max_model_len (ALCF caps some models below their published spec;
   # Hermes' family table would otherwise over-estimate it). Falls back to
   # $ALCF_CONTEXT_LENGTH / 128000 if the lookup fails. Never fatal.
-  ctxlen="$(ALCF_INFER_AUTH="$INFER_AUTH" ALCF_PY="$PY" \
+  ctxlen="$(ALCF_INFER_TOKEN="$token" ALCF_PY="$PY" \
             "$PY" "$ALCF_DIR/resolve_context_length.py" \
             "$ALCF_BASE_URL" "${ALCF_MODEL:-google/gemma-4-31B-it}" 2>>/tmp/ctxlen.log)"
   # Guard: if the resolver printed nothing usable, hard-default here too.
@@ -123,7 +117,7 @@ render_config() {
   # always prints a valid block (committed static fallback on any discovery
   # failure), so this is never fatal. ALCF_ENABLE_METIS=0 / ALCF_ENABLE_MINERVA=0
   # drop those providers.
-  providers_block="$(ALCF_INFER_AUTH="$INFER_AUTH" ALCF_PY="$PY" \
+  providers_block="$(ALCF_INFER_TOKEN="$token" ALCF_PY="$PY" \
             ALCF_ENABLE_METIS="${ALCF_ENABLE_METIS:-1}" \
             ALCF_ENABLE_MINERVA="${ALCF_ENABLE_MINERVA:-1}" \
             ALCF_MAX_TOKENS="${ALCF_MAX_TOKENS:-2048}" \
@@ -212,7 +206,7 @@ render_config() {
   ')"
   if [ -z "$launch_provider" ]; then
     # Fallback: ask the Python resolver (id heuristic + best-effort catalog).
-    launch_provider="$(ALCF_INFER_AUTH="$INFER_AUTH" ALCF_PY="$PY" \
+    launch_provider="$(ALCF_INFER_TOKEN="$token" ALCF_PY="$PY" \
         ALCF_BASE_URL="$ALCF_BASE_URL" \
         "$PY" "$ALCF_DIR/populate_models.py" --launch-provider "$launch_model" \
         2>>/tmp/populate_models.log || true)"
@@ -253,7 +247,7 @@ render_config() {
         $0 ~ "^      " m ":$" { print prov; exit }
       ')"
       if [ -z "$delegation_provider" ]; then
-        delegation_provider="$(ALCF_INFER_AUTH="$INFER_AUTH" ALCF_PY="$PY" \
+        delegation_provider="$(ALCF_INFER_TOKEN="$token" ALCF_PY="$PY" \
             ALCF_BASE_URL="$ALCF_BASE_URL" \
             "$PY" "$ALCF_DIR/populate_models.py" --launch-provider "$delegation_model" \
             2>>/tmp/populate_models.log || true)"
@@ -384,7 +378,7 @@ log "Config rendered -> $CONFIG_OUT (cluster=$ALCF_CLUSTER model=${ALCF_MODEL:-g
 # and best-effort: never fatal (|| true), and the script itself reports "unknown"
 # rather than guessing if /jobs is unreachable.
 if [ "${ALCF_SHOW_MODEL_STATUS:-1}" != "0" ]; then
-  ALCF_INFER_AUTH="$INFER_AUTH" ALCF_PY="$PY" \
+  ALCF_INFER_TOKEN="$("$ALCF_TOKENS" get-token inference 2>/dev/null || true)" ALCF_PY="$PY" \
     ALCF_ENABLE_METIS="${ALCF_ENABLE_METIS:-1}" \
     ALCF_ENABLE_MINERVA="${ALCF_ENABLE_MINERVA:-1}" \
     "$PY" "$ALCF_DIR/populate_models.py" --status-report 2>>/tmp/populate_models.log \
@@ -468,8 +462,8 @@ cp -r "$ALCF_DIR/skills/." "$HERMES_HOME/skills/research/" 2>/dev/null || true
 # (see memory/MEMORY.md → "Inference token expiry"). On success we clear it.
 TOKEN_STATUS="$HERMES_HOME/.inference_token_status"
 : > "$TOKEN_STATUS" 2>/dev/null || true   # start clean (empty = healthy)
-reauth_cmd="docker exec -it <container> \\
-  /opt/hermes/.venv/bin/python /opt/alcf/alcf_combined_auth.py authenticate"
+reauth_cmd="docker exec -it <container> \
+  /opt/hermes/.venv/bin/alcf-tokens login"
 (
   while true; do
     sleep 21600

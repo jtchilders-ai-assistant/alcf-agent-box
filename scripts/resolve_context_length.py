@@ -30,13 +30,12 @@ import argparse
 import json
 import os
 import re
-import subprocess
 import sys
 import urllib.request
 
+from alcf_tokens.auth import get_access_token
+
 DEFAULT_CONTEXT = 128000
-AUTH_HELPER = os.environ.get("ALCF_INFER_AUTH", "/opt/alcf/inference_auth_token.py")
-PY = os.environ.get("ALCF_PY", sys.executable)
 
 
 def _fallback() -> int:
@@ -59,9 +58,11 @@ def _models_url(vllm_base_url: str) -> str:
 
 
 def _get_token() -> str:
-    return subprocess.check_output(
-        [PY, AUTH_HELPER, "get_access_token"], text=True, timeout=30
-    ).strip()
+    # Support passing a pre-fetched token via env to avoid extra alcf-tokens calls.
+    pre = os.environ.get("ALCF_INFER_TOKEN", "").strip()
+    if pre:
+        return pre
+    return get_access_token("inference")
 
 
 def _fetch_max_lens(vllm_base_url: str) -> dict:

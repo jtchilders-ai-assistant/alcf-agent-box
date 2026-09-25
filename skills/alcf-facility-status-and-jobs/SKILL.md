@@ -47,10 +47,10 @@ view is missing a field you need.
 - **`status` first, no login needed.** For "is Polaris up?" just run `status` —
   it reports each system's live `current_status` (up/down/unknown) plus recent
   events. Don't make the user authenticate for a status question.
-- **The other three need the IRI login** (separate from the inference login). If
-  the token is missing the helper exits with code 3 and prints the exact
-  `docker exec ... alcf_facility_api_globus_token.py authenticate` command — relay
-  that to the user; you cannot complete the browser login yourself.
+- **The other three need the IRI credential** from the official combined login.
+  If it is missing, the helper exits with code 3 and prints the exact
+  `docker exec ... /opt/hermes/.venv/bin/alcf-tokens login` command — relay that
+  to the user; you cannot complete the browser login yourself.
 - **This is your FETCH path — pair it with the PBS diagnosis skill.** Use `jobs`
   (or the IRI `job_status` for one job) to PULL the record, then load
   `alcf-pbs-scheduling-and-docs` to interpret `Exit_status` / `run_count` /

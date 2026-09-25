@@ -1,23 +1,19 @@
 #!/usr/bin/env bash
 # Probe the ALCF Inference Service end-to-end: token -> discovery -> hot model -> chat.
-# Prereq: a venv with `openai globus_sdk requests` and inference_auth_token.py present,
-# and you have already run `python inference_auth_token.py authenticate` at least once.
+# Prereq: alcf-tokens is installed and `alcf-tokens login` has completed once.
 #
-# Usage:  ./probe_inference.sh [/path/to/dir/with/inference_auth_token.py]
+# Usage:  ./probe_inference.sh
 # Exits non-zero if any stage fails. Prints a compact PASS/FAIL summary.
 set -uo pipefail
 
-DIR="${1:-.}"
 API="https://inference-api.alcf.anl.gov/resource_server"
-cd "$DIR" || { echo "FAIL: cannot cd to $DIR"; exit 1; }
 
 echo "== 1. token =="
-TOKEN=$(python inference_auth_token.py get_access_token 2>/dev/null)
+TOKEN=$(alcf-tokens get-token inference 2>/dev/null)
 if [ -z "${TOKEN:-}" ]; then
-  echo "FAIL: no access token. Run: python inference_auth_token.py authenticate"; exit 1
+  echo "FAIL: no access token. Run: alcf-tokens login"; exit 1
 fi
-HRS=$(python inference_auth_token.py get_time_until_token_expiration --units hours 2>/dev/null)
-echo "PASS: token len=${#TOKEN}, expires in ${HRS}h"
+echo "PASS: inference access token is available"
 
 echo "== 2. list-endpoints =="
 code=$(curl -s -o /tmp/probe_le.json -w '%{http_code}' --max-time 40 \

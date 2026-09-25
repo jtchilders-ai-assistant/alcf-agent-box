@@ -38,17 +38,14 @@ except Exception as exc:  # pragma: no cover
     print(f"ERROR: could not import iri_api_client: {exc}", file=sys.stderr)
     sys.exit(2)
 
-AUTH_SCRIPT = "/opt/alcf/alcf_facility_api_globus_token.py"
-PYTHON = "/opt/hermes/.venv/bin/python"
+from alcf_tokens.auth import get_access_token
 
 
 def get_token() -> str:
-    import subprocess
-    out = subprocess.check_output([PYTHON, AUTH_SCRIPT, "get_access_token"], text=True)
-    tok = out.strip()
+    tok = get_access_token('iri')
     if not tok or tok.lower().startswith(("error", "traceback")):
         print("ERROR: no valid IRI token. Have the user run:\n"
-              f"  docker exec -it <container> {PYTHON} {AUTH_SCRIPT} authenticate",
+              "  docker exec -it <container> /opt/hermes/.venv/bin/alcf-tokens login",
               file=sys.stderr)
         sys.exit(3)
     return tok

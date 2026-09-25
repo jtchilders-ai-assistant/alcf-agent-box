@@ -2,20 +2,19 @@
 """Reusable thin client for the ALCF IRI Facility API (api.alcf.anl.gov).
 
 Handles the async filesystem task model (submit -> poll /task/{id}) and provides
-small wrappers around the documented endpoints. Requires a valid access token from
-alcf_facility_api_globus_token.py (see the alcf-iri-facility-api SKILL.md for the
-Globus interactive-auth recipe).
+small wrappers around the documented endpoints. In Agent in a Box, use the
+official ``alcf-tokens`` package for the IRI service credential.
 
 Usage:
     from iri_api_client import IRI
-    api = IRI.from_token_command()          # runs `get_access_token` via the auth script
+    api = IRI.from_alcf_tokens()            # official package; refreshes if needed
     # or: api = IRI(token="Agx...")         # pass a token string directly
     print(api.resources())                  # no-auth status
     print(api.projects())                   # auth: your ALCF projects
     print(api.ls(IRI.HOME, "/home/<you>"))  # async fs op, auto-polled
 """
 import json
-import subprocess
+
 import time
 import urllib.parse
 import urllib.request
@@ -42,9 +41,9 @@ class IRI:
         self.token = token
 
     @classmethod
-    def from_token_command(cls, script="alcf_facility_api_globus_token.py", python="python"):
-        out = subprocess.check_output([python, script, "get_access_token"], text=True).strip()
-        return cls(token=out)
+    def from_alcf_tokens(cls):
+        from alcf_tokens.auth import get_access_token
+        return cls(token=get_access_token("iri"))
 
     def _req(self, method, path, params=None, body=None, auth=True):
         url = f"{BASE}{path}"

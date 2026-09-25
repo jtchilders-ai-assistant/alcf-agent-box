@@ -68,7 +68,7 @@ Usage
     populate_models.py --launch-provider ID
 
 Prints the YAML block to stdout (and to --out if given). Reads:
-    ALCF_INFER_AUTH     path to inference_auth_token.py (token source)
+    ALCF_INFER_TOKEN    optional pre-fetched inference token
     ALCF_PY             python used to run the auth helper (default: this python)
     ALCF_ENABLE_METIS   include the Metis provider?   "1" (default) / "0"
     ALCF_ENABLE_MINERVA include the Minerva provider? "1" (default) / "0"
@@ -76,7 +76,6 @@ Prints the YAML block to stdout (and to --out if given). Reads:
 import json
 import os
 import re
-import subprocess
 import sys
 import textwrap
 import urllib.request
@@ -97,9 +96,7 @@ MINERVA_BASE = f"{INFER_HOST}/minerva/api/v1"
 # cluster once /models returns entries.
 PROVISIONING_CLUSTERS = ("tara",)
 
-AUTH_HELPER = os.environ.get("ALCF_INFER_AUTH", "/opt/alcf/inference_auth_token.py")
 PY = os.environ.get("ALCF_PY", sys.executable)
-
 # Fallback context window for a chat model that reports no server value.
 DEFAULT_CONTEXT = 32768
 
@@ -229,12 +226,16 @@ MINERVA_FALLBACK = {
 }
 
 
+from alcf_tokens.auth import get_access_token
+
+
 def _get_token() -> str:
-    out = subprocess.check_output(
-        [PY, AUTH_HELPER, "get_access_token"], text=True, timeout=30
-    )
-    # the helper may emit warnings on earlier lines; the token is the last line
-    return out.strip().splitlines()[-1].strip()
+    # Support passing a pre-fetched token via env (set by entrypoint to avoid
+    # extra alcf-tokens calls during the same render_config invocation).
+    pre = os.environ.get("ALCF_INFER_TOKEN", "").strip()
+    if pre:
+        return pre
+    return get_access_token("inference")
 
 
 def _fetch_models(cluster: str, token: str) -> list:

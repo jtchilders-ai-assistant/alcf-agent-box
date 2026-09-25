@@ -17,7 +17,7 @@ Run with the bundled python:
         --path /home/<user>/iri_hello.out --lines 40
 
 Everything is READ-ONLY. `status` needs no token (works before login); the
-others use the IRI Globus token via the bundled auth script. All requests go
+others use the IRI Globus token via the official ``alcf-tokens`` package. All requests go
 through iri_api_client, which sets the User-Agent Cloudflare requires (avoids
 the 403 "error code: 1010" bot-block).
 """
@@ -26,7 +26,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import subprocess
 import sys
 
 # Make the bundled client importable regardless of cwd (same pattern as
@@ -49,8 +48,7 @@ except Exception as exc:  # pragma: no cover
     print(f"ERROR: could not import iri_api_client: {exc}", file=sys.stderr)
     sys.exit(2)
 
-AUTH_SCRIPT = "/opt/alcf/alcf_facility_api_globus_token.py"
-PYTHON = "/opt/hermes/.venv/bin/python"
+from alcf_tokens.auth import get_access_token
 
 CLUSTERS = ("polaris", "crux", "aurora", "sophia")
 
@@ -59,20 +57,14 @@ def _authed_client() -> IRI:
     """Build an IRI client with a token, or exit with a clear message if the
     IRI login is missing (the agent cannot complete the browser login itself)."""
     try:
-        token = subprocess.check_output(
-            [PYTHON, AUTH_SCRIPT, "get_access_token"], text=True,
-            stderr=subprocess.DEVNULL,
-        ).strip()
+        token = get_access_token('iri')
     except Exception:
         token = ""
     if not token:
         print(
-            "ERROR: no IRI Facility API token. This command needs the IRI login "
-            "(separate from the inference login). Ask the user to run once on "
-            "the host:\n"
+            "ERROR: no IRI Facility API token. Re-authenticate on the host:\n"
             "    docker exec -it <container> \\\n"
-            "      /opt/hermes/.venv/bin/python "
-            "/opt/alcf/alcf_facility_api_globus_token.py authenticate\n"
+            "      /opt/hermes/.venv/bin/alcf-tokens login\n"
             "then retry.",
             file=sys.stderr,
         )
@@ -141,13 +133,12 @@ def cmd_jobs(args) -> int:
               "empty queue.", file=sys.stderr)
         print(f"  {resp['error']}", file=sys.stderr)
         if status == 401:
-            print("\nThe IRI/facility API uses a 48h high-assurance Globus "
-                  "token, separate from the inference and Globus Compute "
-                  "logins. Re-authenticate:\n"
+            print("\nThe IRI/facility API uses the IRI token from the official "
+                  "combined alcf-tokens login. Re-authenticate:\n"
                   "  1. Log out at https://app.globus.org/logout (incognito "
                   "window or cleared cache)\n"
                   "  2. Authenticate with the alcf.anl.gov identity provider\n"
-                  "  3. Re-run: alcf_facility_api_globus_token.py authenticate",
+                  "  3. Re-run: alcf-tokens login",
                   file=sys.stderr)
         return 4
 

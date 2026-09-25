@@ -81,34 +81,24 @@ import re
 import sys
 import time
 
-# The agent-in-a-box uses ONE combined Globus consent for all ALCF services
-# (see alcf_combined_auth.py). Prefer driving Globus Compute from that shared
-# consent so the user does not need a SEPARATE Globus Compute login. If the
-# combined module or its tokens are unavailable (e.g. running this script
-# standalone outside the box), we fall back to the SDK's own login flow.
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-try:
-    import alcf_combined_auth as _combined  # noqa: E402
-except Exception:  # pragma: no cover - standalone fallback
-    _combined = None
+# The agent-in-a-box uses the official alcf-tokens package for all ALCF auth.
+# For Globus Compute, get_service_authorizer('globus-compute') returns a
+# refresh-token authorizer that is passed to Client(authorizer=...).
+from alcf_tokens.auth import get_service_authorizer
 
 
 def _make_compute_client():
-    """Return a globus_compute_sdk.Client bound to the COMBINED consent, or None
-    to let the SDK use its own login. Uses Client(app=<combined UserApp>) — the
-    modern, supported way to hand the compute SDK an existing GlobusApp so it
-    reuses our token instead of triggering a separate browser login."""
-    if _combined is None or not _combined.compute_enabled():
+    """Return a Compute client bound to the official alcf-tokens authorizer.
+
+    Authentication failures deliberately propagate. Falling back to the SDK's
+    independent login would create a second token authority and violate the
+    product's one-login contract.
+    """
+    if not _enabled():
         return None
-    if not _combined.has_tokens():
-        return None
-    try:
-        from globus_compute_sdk import Client
-        app = _combined.build_user_app(interactive=False)
-        return Client(app=app, do_version_check=False)
-    except Exception:
-        # Any problem building the shared client -> fall back to SDK's own login.
-        return None
+    from globus_compute_sdk import Client
+    authorizer = get_service_authorizer("globus-compute")
+    return Client(authorizer=authorizer, do_version_check=False)
 
 # ALCF documented multi-user endpoints (docs.alcf.anl.gov/services/globus-compute).
 # These are stable, ALCF-operated MEP UUIDs. Jobs run under the SUBMITTING user's
@@ -431,67 +421,32 @@ def _import_sdk():
 def cmd_authenticate(args) -> int:
     """Trigger the Globus Compute login.
 
-    In the agent-in-a-box the Globus Compute login is part of the ONE combined
-    Globus consent (see alcf_combined_auth.py). So if the combined path is
-    available we do NOT start a separate login here — we run (or confirm) the
-    combined login, which covers inference + IRI + Globus Compute together.
-
-    Standalone (no combined module), fall back to the compute SDK's own login:
-    the first authenticated call prints a URL and blocks for the code.
+    With alcf-tokens, Globus Compute is part of the ONE combined login that
+    covers all ALCF services. Run alcf-tokens login to (re-)authenticate.
     """
-    # Preferred: combined single consent.
-    if _combined is not None and _combined.compute_enabled():
-        if _combined.has_tokens() and _has_tokens():
-            print("[remote-bash] Globus Compute is already authenticated via the "
-                  "combined ALCF login (one login covers inference + IRI + compute).")
-            return 0
-        print("[remote-bash] Globus Compute uses the COMBINED ALCF login (one login "
-              "for all services). Running it now ...\n")
-        return _combined._cli_authenticate()
-
-    _import_sdk()
-    from globus_compute_sdk import Client
-
-    print("[remote-bash] Starting Globus Compute login (separate from inference + IRI).")
-    print("[remote-bash] A URL will be printed — open it, log in with your ALCF/Globus")
-    print("[remote-bash] account, and paste the authorization code back here.\n")
-    gcc = Client()
-    # version_check / get_version forces the auth handshake + a real API call.
-    try:
-        _ = gcc.web_client.get_version()
-    except Exception as exc:
-        # Even if the version call has issues, the login prompt has already run;
-        # verify by checking the token store below.
-        print(f"[remote-bash] (note: post-login API probe said: {exc})")
-    if _has_tokens():
-        print("\n[remote-bash] Globus Compute authentication OK "
-              "(tokens cached at ~/.globus_compute/storage.db).")
-        return 0
-    print("\n[remote-bash] Authentication did not complete — no token cache found.",
-          file=sys.stderr)
-    return 1
+    print("[remote-bash] Globus Compute uses the official alcf-tokens combined login.")
+    print("[remote-bash] Run on the host to authenticate (or re-authenticate):")
+    print("    docker exec -it <container> /opt/hermes/.venv/bin/alcf-tokens login")
+    return 0
 
 
 def _has_tokens() -> bool:
-    """True if Globus Compute is authenticated. Prefer the COMBINED consent
-    (one login for all ALCF services); fall back to the compute SDK's own token
-    store (~/.globus_compute/storage.db) for standalone use."""
-    if _combined is not None and _combined.compute_enabled() and _combined.has_tokens():
-        return True
-    store = os.path.expanduser("~/.globus_compute/storage.db")
-    return os.path.isfile(store) and os.path.getsize(store) > 0
+    """True if Globus Compute is authenticated via the alcf-tokens store."""
+    try:
+        from alcf_tokens.auth import get_service_authorizer  # noqa: F401
+        auth = get_service_authorizer("globus-compute")
+        auth.ensure_valid_token()
+        return bool(auth.access_token)
+    except Exception:
+        return False
 
 
 def cmd_check(args) -> int:
     enabled = _enabled()
     toks = _has_tokens()
-    if _combined is not None and _combined.compute_enabled():
-        token_store = _combined.TOKENS_PATH
-    else:
-        token_store = "~/.globus_compute/storage.db (standalone fallback)"
     print(f"globus compute      : {'enabled' if enabled else 'DISABLED (ALCF_ENABLE_GLOBUS_COMPUTE=0)'}")
-    print(f"globus-compute login: {'present' if toks else 'MISSING (run: authenticate)'}")
-    print(f"token store         : {token_store}")
+    print(f"globus-compute login: {'present' if toks else 'MISSING (run: alcf-tokens login)'}")
+    print(f"token source        : alcf-tokens (official ALCF package)")
     print(f"endpoints           : " + ", ".join(f"{k}={v}" for k, v in MEPS.items()))
     # Non-zero exit if not ready, so the agent can branch on it.
     return 0 if (enabled and toks) else 1
@@ -503,16 +458,9 @@ def _preflight_run(args) -> int | None:
     _require_enabled()
     _import_sdk()
     if not _has_tokens():
-        if _combined is not None and _combined.compute_enabled():
-            auth_command = (
-                "docker exec -it <container> /opt/hermes/.venv/bin/python \\\n"
-                "      /opt/alcf/alcf_combined_auth.py authenticate --force"
-            )
-        else:
-            auth_command = (
-                "docker exec -it <container> /opt/hermes/.venv/bin/python \\\n"
-                "      /opt/alcf/alcf_remote_bash.py authenticate"
-            )
+        auth_command = (
+            "docker exec -it <container> /opt/hermes/.venv/bin/alcf-tokens login"
+        )
         print(
             "ERROR: no Globus Compute login. Run once on the host:\n"
             f"    {auth_command}",
