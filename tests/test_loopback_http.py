@@ -28,6 +28,19 @@ class LoopbackHttpContractTests(unittest.TestCase):
             self.assertNotIn("self-signed", body.lower(), relative)
             self.assertNotIn("https://localhost", body, relative)
 
+    def test_podman_publishes_only_to_host_loopback(self):
+        readme = (ROOT / "README.md").read_text()
+        podman = readme.split("## Run locally with Podman", 1)[1].split("## ", 1)[0]
+        self.assertIn("-p 127.0.0.1:8787:8787", podman)
+        self.assertNotIn("-p 8787:8787", podman)
+
+    def test_apptainer_uses_host_network_without_port_mapping(self):
+        readme = (ROOT / "README.md").read_text()
+        apptainer = readme.split("## Run locally with Apptainer", 1)[1].split("## ", 1)[0]
+        self.assertIn("host network", apptainer)
+        self.assertNotIn("--net", apptainer)
+        self.assertNotIn("portmap=", apptainer)
+
 
 if __name__ == "__main__":
     unittest.main()

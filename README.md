@@ -1,8 +1,8 @@
 # ALCF Agent in a Box
 
-A ready-to-run AI agent for **ALCF users**, packaged as a Docker image. Check it
-out, run one command, log in with your ALCF/Globus credentials, and get a local
-web chat that can:
+A ready-to-run AI agent for **ALCF users**, packaged as an OCI container image.
+Run it locally with Docker, Podman, or Apptainer, log in with your ALCF/Globus
+credentials, and get a local web chat that can:
 
 - **Answer questions about ALCF** using the latest ALCF documentation and a
   curated knowledge base (baked into the image).
@@ -28,7 +28,12 @@ agent framework with persistent memory, skills, and a built-in web dashboard.
 
 ---
 
-## Quick start
+The agent runs on your local machine. It sends inference requests to ALCF and,
+when you ask it to act remotely, uses IRI and Globus Compute under your ALCF
+identity. These instructions do **not** run the agent on an ALCF login or compute
+node and do not give the container SSH access.
+
+## Quick start with Docker
 
 ```bash
 docker run -it --rm \
@@ -57,22 +62,116 @@ The single `alcf-agent-home` volume persists your Globus tokens **and** the
 agent's memory across restarts, so you only log in occasionally (tokens last 48h
 and auto-refresh; a full re-auth is required every 30 days).
 
+## Run locally with Podman
+
+Podman accepts the same OCI image and run options. This command keeps the web
+dashboard bound to your machine's loopback interface and stores state in a
+Podman-managed named volume:
+
+```bash
+podman run -it --rm \
+  --name alcf-agent \
+  -p 127.0.0.1:8787:8787 \
+  -e ALCF_DASHBOARD_PASSWORD='choose-a-password' \
+  -v alcf-agent-home:/opt/data \
+  ghcr.io/jtchilders-ai-assistant/alcf-agent:latest
+```
+
+Open <http://localhost:8787>. First-run authentication and subsequent behavior
+are the same as with Docker. To renew expired credentials while the named
+container is running:
+
+```bash
+podman exec -it alcf-agent \
+  /opt/hermes/.venv/bin/alcf-tokens login
+```
+
+## Run locally with Apptainer
+
+This path is for a **local Linux machine** with Apptainer installed. Apptainer
+uses the host network by default, so the dashboard's existing loopback listener
+is available at <http://localhost:8787>; do not add a network namespace or port
+mapping. Unlike Docker and Podman, Apptainer normally exposes your home and
+current directory inside the container. The commands below replace the home
+mount with a private state directory, disable the current-directory mount, and
+bind that same private directory to `/opt/data`.
+
+Pull the public OCI image into a local SIF, then create persistent state:
+
+```bash
+apptainer pull alcf-agent.sif \
+  docker://ghcr.io/jtchilders-ai-assistant/alcf-agent:latest
+mkdir -p "$HOME/.local/share/alcf-agent"
+chmod 700 "$HOME/.local/share/alcf-agent"
+APPTAINER_HOME="$HOME/.local/share/alcf-agent"
+```
+
+Run the remaining commands from the same shell so `APPTAINER_HOME` remains set.
+
+Set the dashboard password through Apptainer's explicit container-environment
+prefix and start the agent:
+
+```bash
+export APPTAINERENV_ALCF_DASHBOARD_PASSWORD='choose-a-password'
+apptainer run --containall --no-mount cwd \
+  --home "$APPTAINER_HOME:$HOME" \
+  --cwd /opt/data \
+  --bind "$HOME/.local/share/alcf-agent:/opt/data" \
+  alcf-agent.sif
+```
+
+`apptainer run` executes the OCI image's built-in entrypoint; do not append an
+entrypoint command. The private home mapping is required because Globus stores
+credentials below `$HOME/.globus`, while the `/opt/data` bind stores Hermes
+state. Both resolve to the same host directory. Apptainer runs as your host UID,
+so the directory you create is writable without `--fakeroot`.
+
+The SIF itself is read-only. To expose a dedicated local work directory, create
+it first and add one narrow bind—never bind your entire home:
+
+```bash
+mkdir -p "$HOME/alcf-work"
+apptainer run --containall --no-mount cwd \
+  --home "$APPTAINER_HOME:$HOME" \
+  --cwd /opt/data \
+  --bind "$HOME/.local/share/alcf-agent:/opt/data" \
+  --bind "$HOME/alcf-work:/work" \
+  alcf-agent.sif
+```
+
+To renew expired credentials using the same persistent state:
+
+```bash
+apptainer exec --containall --no-mount cwd \
+  --home "$APPTAINER_HOME:$HOME" \
+  --cwd /opt/data \
+  --bind "$HOME/.local/share/alcf-agent:/opt/data" \
+  alcf-agent.sif /opt/hermes/.venv/bin/alcf-tokens login
+```
+
+Apptainer receives most image environment defaults from the OCI image. For any
+override listed under **Configuration knobs**, export the corresponding
+`APPTAINERENV_` variable—for example,
+`APPTAINERENV_ALCF_BASH_ACCOUNT=my-project`.
+
 ## Data & filesystem access (sandboxed by design)
 
 **The agent cannot see or touch your laptop's files.** It runs fully inside the
 container. Its file and terminal tools only reach the container's own
 filesystem:
 
-- `/opt/data` — the one **named Docker volume** (`alcf-agent-home`). This is
-  Docker-managed storage, **not** a folder in your home directory. It holds the
-  agent's config, memory, Globus tokens, and session history so they survive
-  restarts.
+- `/opt/data` — persistent private state. Docker and Podman use the named volume
+  `alcf-agent-home`; the Apptainer command above binds the dedicated
+  `$HOME/.local/share/alcf-agent` directory. It holds the agent's config, memory,
+  Globus tokens, and session history so they survive restarts.
 - `/opt/alcf`, `/opt/hermes` — baked-in ALCF content and the agent code.
 
-Nothing under your host home (`~/Documents`, `~/anl`, etc.) is bind-mounted, so
-the agent can't read or modify your local files, and `--rm` discards the
-container on exit (only the named volume persists). This is intentional: a
-support tool shouldn't have ambient access to a user's machine.
+Nothing else under your host home (`~/Documents`, `~/anl`, etc.) is mounted by
+the documented commands, so the agent can't read or modify your other local
+files. Docker and Podman discard the container on exit with `--rm`; Apptainer's
+SIF is read-only. In every case only the explicit state storage persists. This
+is intentional: a support tool shouldn't have ambient access to a user's
+machine.
 
 If you *want* the agent to work with local files, add an explicit bind mount of
 a **dedicated** directory (never your whole home):
@@ -89,9 +188,11 @@ docker run -it --rm -p 127.0.0.1:8787:8787 \
 Then ask the agent to read/write under `/work`. Only that directory is exposed.
 
 > **Security:** publish the dashboard exactly as shown, on host `127.0.0.1`
-> only. Browsers grant `http://localhost` secure-context privileges for clipboard
-> access, while the dashboard username/password gate remains enabled. Do not
-> replace the mapping with `-p 8787:8787`, which exposes it on every interface.
+> only with Docker or Podman. Apptainer uses the host network and the image's
+> Caddy configuration listens only on `localhost` / `127.0.0.1`. Browsers grant
+> `http://localhost` secure-context privileges for clipboard access, while the
+> dashboard username/password gate remains enabled. Do not replace the Docker or
+> Podman mapping with `-p 8787:8787`, which exposes it on every interface.
 >
 > **Reauthentication:** all enabled ALCF services share the combined login. If
 > the agent reports expired or missing credentials, renew them with `alcf-tokens login`:
@@ -108,7 +209,7 @@ Then ask the agent to read/write under `/work`. Only that directory is exposed.
 When the base Hermes supports MCP, the agent's compute-node shell is also
 exposed to the model as a native **`bash` tool**: one warm node held across the
 conversation, with `cd` / `export` / `module load` persisting between commands
-like a real login shell. Recommended knobs at `docker run`:
+like a real login shell. Recommended container environment overrides:
 
 - `-e ALCF_BASH_ACCOUNT=<project>` — default ALCF project to charge (otherwise
   the agent looks one up or asks you, then it sticks for the session).
@@ -118,7 +219,8 @@ like a real login shell. Recommended knobs at `docker run`:
 - `-e ALCF_DELEGATION_MODEL=google/gemma-4-26B-A4B-it` — run `delegate_task`
   subagents (e.g. build/test workers) on a **262k-context** model while your
   chat stays on the default. Defaults to the chat model if unset.
-> The token is stored in the `alcf-agent-home` volume, so it persists.
+> The token is stored under `/opt/data`, so it persists in the configured volume
+> or state directory.
 >
 > **Network:** the ALCF Inference Service endpoint (`inference-api.alcf.anl.gov`)
 > is public-facing, so this works from a laptop off the ALCF network. Some IRI
@@ -162,8 +264,8 @@ no-op. See [docs/DESIGN.md](docs/DESIGN.md) for the full root-cause writeup.
 ## Configuration knobs
 
 Everything is driven by `config/config.template.yaml`, rendered into the
-running config at container start. Environment variables you can override at
-`docker run` time:
+running config at container start. Pass these with `-e` to Docker/Podman or as
+`APPTAINERENV_...` variables to Apptainer:
 
 | Env var | Default | Meaning |
 |---|---|---|
